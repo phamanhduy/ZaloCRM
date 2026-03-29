@@ -11,5 +11,9 @@ export const config = {
   databaseUrl: process.env.DATABASE_URL || 'postgresql://crmuser:password@localhost:5432/zalocrm',
   uploadDir: process.env.UPLOAD_DIR || '/var/lib/zalo-crm/files',
   appUrl: process.env.APP_URL || 'http://localhost:3000',
+  aiDefaultProvider: process.env.AI_DEFAULT_PROVIDER || 'anthropic',
+  aiDefaultModel: process.env.AI_DEFAULT_MODEL || 'claude-sonnet-4-6',
+  anthropicApiKey: process.env.ANTHROPIC_API_KEY || '',
+  geminiApiKey: process.env.GEMINI_API_KEY || '',
   isProduction: process.env.NODE_ENV === 'production',
 };

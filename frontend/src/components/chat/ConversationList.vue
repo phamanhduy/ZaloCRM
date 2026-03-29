@@ -61,6 +61,7 @@
             {{ lastMessagePreview(conv) }}
           </span>
           <v-spacer />
+          <AiSentimentBadge v-if="parseSentiment(conv)" :sentiment="parseSentiment(conv)" class="mr-2" />
           <v-badge
             v-if="conv.unreadCount > 0"
             :content="conv.unreadCount"
@@ -86,8 +87,9 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
-import type { Conversation } from '@/composables/use-chat';
+import type { Conversation, AiSentiment } from '@/composables/use-chat';
 import { api } from '@/api/index';
+import AiSentimentBadge from '@/components/ai/ai-sentiment-badge.vue';
 
 defineProps<{
   conversations: Conversation[];
@@ -146,6 +148,16 @@ function lastMessagePreview(conv: Conversation): string {
 
   const text = msg.content || '';
   return prefix + (text.length > 50 ? text.slice(0, 50) + '...' : text);
+}
+
+function parseSentiment(conv: Conversation): AiSentiment | null {
+  const raw = (conv.contact as any)?.metadata?.aiSentiment;
+  if (!raw) return null;
+  try {
+    return typeof raw === 'string' ? JSON.parse(raw) : raw;
+  } catch {
+    return null;
+  }
 }
 
 function formatTime(dateStr: string | null): string {

@@ -22,6 +22,8 @@ model Organization {
   activityLogs  ActivityLog[]
   dailyStats    DailyMessageStat[]
   settings      AppSetting[]
+  aiConfig      AiConfig?
+  aiSuggestions AiSuggestion[]
 
   @@map("organizations")
 }
@@ -144,10 +146,11 @@ model Conversation {
   isReplied        Boolean   @default(true) @map("is_replied")
   createdAt        DateTime  @default(now()) @map("created_at")
 
-  org         Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  zaloAccount ZaloAccount  @relation(fields: [zaloAccountId], references: [id], onDelete: Cascade)
-  contact     Contact?     @relation(fields: [contactId], references: [id])
-  messages    Message[]
+  org           Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  zaloAccount   ZaloAccount   @relation(fields: [zaloAccountId], references: [id], onDelete: Cascade)
+  contact       Contact?      @relation(fields: [contactId], references: [id])
+  messages      Message[]
+  aiSuggestions AiSuggestion[]
 
   @@unique([zaloAccountId, externalThreadId])
   @@map("conversations")
@@ -249,3 +252,39 @@ model AppSetting {
   @@unique([orgId, settingKey])
   @@map("app_settings")
 }
+
+model AiConfig {
+  id        String   @id @default(uuid())
+  orgId     String   @unique @map("org_id")
+  provider  String   @default("anthropic")
+  model     String   @default("claude-sonnet-4-6")
+  maxDaily  Int      @default(500) @map("max_daily")
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@map("ai_configs")
+}
+
+model AiSuggestion {
+  id             String    @id @default(uuid())
+  orgId          String    @map("org_id")
+  conversationId String    @map("conversation_id")
+  messageId      String?   @map("message_id")
+  type           String
+  content        String
+  confidence     Float
+  accepted       Boolean   @default(false)
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  org          Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([orgId, createdAt])
+  @@index([conversationId, createdAt])
+  @@index([orgId, type, createdAt])
+  @@map("ai_suggestions")
+}
+

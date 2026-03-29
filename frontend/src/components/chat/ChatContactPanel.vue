@@ -3,7 +3,6 @@
     class="chat-contact-panel d-flex flex-column"
     style="width: 320px; border-left: 1px solid rgba(0,0,0,0.12); height: 100%; overflow-y: auto; flex-shrink: 0;"
   >
-    <!-- Header -->
     <div class="pa-3 d-flex align-center" style="border-bottom: 1px solid rgba(0,0,0,0.12);">
       <v-icon icon="mdi-account-details" class="mr-2" />
       <span class="font-weight-medium">Thông tin khách hàng</span>
@@ -13,7 +12,6 @@
       </v-btn>
     </div>
 
-    <!-- Form -->
     <div class="pa-3">
       <v-text-field v-model="form.fullName" label="Họ tên" density="compact" variant="outlined" class="mb-2" hide-details />
       <v-text-field v-model="form.phone" label="Số điện thoại" density="compact" variant="outlined" class="mb-2" hide-details />
@@ -46,7 +44,21 @@
         Lưu thất bại, thử lại!
       </v-alert>
 
-      <!-- Appointments sub-component -->
+      <AiSummaryCard :summary="aiSummary" :loading="aiSummaryLoading" @refresh="$emit('refresh-ai-summary')" />
+
+      <v-card variant="outlined" class="mb-3">
+        <v-card-title class="d-flex align-center text-body-1">
+          <v-icon class="mr-2">mdi-chart-bell-curve-cumulative</v-icon>
+          Cảm xúc khách hàng
+          <v-spacer />
+          <v-btn size="small" variant="text" :loading="aiSentimentLoading" @click="$emit('refresh-ai-sentiment')">Làm mới</v-btn>
+        </v-card-title>
+        <v-card-text>
+          <AiSentimentBadge :sentiment="aiSentiment" />
+          <div v-if="aiSentiment?.reason" class="text-body-2 mt-2">{{ aiSentiment.reason }}</div>
+        </v-card-text>
+      </v-card>
+
       <ChatAppointments
         v-if="props.contactId"
         :contact-id="props.contactId"
@@ -60,15 +72,22 @@
 <script setup lang="ts">
 import { SOURCE_OPTIONS, STATUS_OPTIONS } from '@/composables/use-contacts';
 import type { Contact } from '@/composables/use-contacts';
+import type { AiSentiment } from '@/composables/use-chat';
 import { useChatContactPanel } from '@/composables/use-chat-contact-panel';
 import ChatAppointments from './ChatAppointments.vue';
+import AiSummaryCard from '@/components/ai/ai-summary-card.vue';
+import AiSentimentBadge from '@/components/ai/ai-sentiment-badge.vue';
 
 const props = defineProps<{
   contactId: string | null;
   contact: Contact | null;
+  aiSummary: string;
+  aiSummaryLoading: boolean;
+  aiSentiment: AiSentiment | null;
+  aiSentimentLoading: boolean;
 }>();
 
-const emit = defineEmits<{ close: []; saved: [] }>();
+const emit = defineEmits<{ close: []; saved: []; 'refresh-ai-summary': []; 'refresh-ai-sentiment': [] }>();
 
 const {
   form, saving, saveSuccess, saveError,

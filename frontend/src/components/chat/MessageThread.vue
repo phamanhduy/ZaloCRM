@@ -20,6 +20,9 @@
           <div class="font-weight-medium">{{ conversation.contact?.fullName || 'Unknown' }}</div>
           <div class="text-caption text-grey">{{ conversation.zaloAccount?.displayName || 'Zalo' }}</div>
         </div>
+        <v-btn size="small" variant="tonal" color="primary" class="mr-2" :loading="aiSuggestionLoading" @click="$emit('ask-ai')">
+          Ask AI
+        </v-btn>
         <v-btn
           :icon="showContactPanel ? 'mdi-account-details' : 'mdi-account-details-outline'"
           size="small" variant="text"
@@ -88,9 +91,18 @@
       </div>
 
       <!-- Input -->
-      <div class="pa-2 d-flex align-end chat-input-area">
-        <v-textarea v-model="inputText" placeholder="Nhập tin nhắn..." variant="solo-filled" density="compact" hide-details auto-grow rows="1" max-rows="3" @keydown.enter.exact.prevent="handleSend" class="flex-grow-1 mr-2" />
-        <v-btn icon color="primary" :loading="sending" :disabled="!inputText.trim()" @click="handleSend"><v-icon>mdi-send</v-icon></v-btn>
+      <div class="pa-2 chat-input-area">
+        <AiSuggestionPanel
+          :suggestion="aiSuggestion"
+          :loading="aiSuggestionLoading"
+          :error="aiSuggestionError"
+          @generate="$emit('ask-ai')"
+          @apply="applySuggestion"
+        />
+        <div class="d-flex align-end">
+          <v-textarea v-model="inputText" placeholder="Nhập tin nhắn..." variant="solo-filled" density="compact" hide-details auto-grow rows="1" max-rows="3" @keydown.enter.exact.prevent="handleSend" class="flex-grow-1 mr-2" />
+          <v-btn icon color="primary" :loading="sending" :disabled="!inputText.trim()" @click="handleSend"><v-icon>mdi-send</v-icon></v-btn>
+        </div>
       </div>
     </template>
 
@@ -111,6 +123,7 @@
 import { ref, watch, nextTick, computed } from 'vue';
 import type { Conversation, Message } from '@/composables/use-chat';
 import { api } from '@/api/index';
+import AiSuggestionPanel from '@/components/ai/ai-suggestion-panel.vue';
 
 const props = defineProps<{
   conversation: Conversation | null;
@@ -118,9 +131,12 @@ const props = defineProps<{
   loading: boolean;
   sending: boolean;
   showContactPanel?: boolean;
+  aiSuggestion: string;
+  aiSuggestionLoading: boolean;
+  aiSuggestionError: string;
 }>();
 
-const emit = defineEmits<{ send: [content: string]; 'toggle-contact-panel': [] }>();
+const emit = defineEmits<{ send: [content: string]; 'toggle-contact-panel': []; 'ask-ai': [] }>();
 
 const inputText = ref('');
 const messagesContainer = ref<HTMLElement | null>(null);
@@ -129,6 +145,7 @@ const showImagePreview = computed({ get: () => !!previewImageUrl.value, set: (v)
 const syncSnack = ref({ show: false, text: '', color: 'success' });
 
 function handleSend() { if (!inputText.value.trim()) return; emit('send', inputText.value); inputText.value = ''; }
+function applySuggestion() { if (!props.aiSuggestion) return; inputText.value = props.aiSuggestion; }
 function formatMessageTime(d: string) { return new Date(d).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }); }
 function openFile(url: string) { window.open(url, '_blank'); }
 

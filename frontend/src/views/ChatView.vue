@@ -20,7 +20,11 @@
       :messages="messages"
       :loading="loadingMsgs"
       :sending="sendingMsg"
+      :ai-suggestion="aiSuggestion"
+      :ai-suggestion-loading="aiSuggestionLoading"
+      :ai-suggestion-error="aiSuggestionError"
       @send="sendMessage"
+      @ask-ai="generateAiSuggestion"
       @toggle-contact-panel="showContactPanel = !showContactPanel"
       :show-contact-panel="showContactPanel"
       style="flex: 1; min-width: 300px;"
@@ -32,6 +36,12 @@
       <ChatContactPanel
         :contact-id="selectedConv.contact.id"
         :contact="selectedConv.contact"
+        :ai-summary="aiSummary"
+        :ai-summary-loading="aiSummaryLoading"
+        :ai-sentiment="aiSentiment"
+        :ai-sentiment-loading="aiSentimentLoading"
+        @refresh-ai-summary="generateAiSummary"
+        @refresh-ai-sentiment="generateAiSentiment"
         @close="showContactPanel = false"
         @saved="fetchConversations()"
       />
@@ -49,7 +59,10 @@ import { useChat } from '@/composables/use-chat';
 const {
   conversations, selectedConvId, selectedConv, messages,
   loadingConvs, loadingMsgs, sendingMsg, searchQuery, accountFilter,
-  fetchConversations, selectConversation, sendMessage,
+  aiSuggestion, aiSuggestionLoading, aiSuggestionError,
+  aiSummary, aiSummaryLoading, aiSentiment, aiSentimentLoading,
+  fetchConversations, fetchAiConfig, selectConversation, sendMessage,
+  generateAiSuggestion, generateAiSummary, generateAiSentiment,
   initSocket, destroySocket,
 } = useChat();
 
@@ -100,7 +113,7 @@ function stopResize() {
   document.body.style.userSelect = '';
 }
 
-onMounted(() => { fetchConversations(); initSocket(); });
+onMounted(() => { fetchConversations(); fetchAiConfig(); initSocket(); });
 onUnmounted(() => { destroySocket(); });
 
 let searchTimeout: ReturnType<typeof setTimeout>;
