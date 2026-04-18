@@ -8,15 +8,17 @@
  */
 import { createRequire } from 'module';
 import type { Server } from 'socket.io';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { db } from '../../shared/database/db.js';
+import { zaloAccounts } from '../../shared/database/schema.js';
+import { eq } from 'drizzle-orm';
 import { logger } from '../../shared/utils/logger.js';
 import { attachZaloListener, type UserInfoCacheEntry } from './zalo-listener-factory.js';
 import { emitWebhook } from '../api/webhook-service.js';
 
 // zca-js has no reliable ESM type exports — load via CJS interop
-const require = createRequire(import.meta.url);
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { Zalo } = require('zca-js') as { Zalo: new (opts: { logging: boolean }) => any };
+import * as ZcaPackage from 'zca-js';
+const { Zalo } = ZcaPackage as unknown as { Zalo: new (opts: { logging: boolean }) => any };
 
 interface ZaloCredentials {
   cookie: any;
@@ -91,20 +93,26 @@ class ZaloAccountPool {
         const profiles = userInfo?.changed_profiles || {};
         const profile = profiles[ownId] || profiles[`${ownId}_0`];
         if (profile?.avatar) {
-          await prisma.zaloAccount.update({
-            where: { id: accountId },
-            data: { avatarUrl: profile.avatar, displayName: profile.zaloName || profile.zalo_name || profile.displayName || instance.displayName },
-          });
+          await db.update(zaloAccounts)
+            .set({ 
+              avatarUrl: profile.avatar, 
+              displayName: profile.zaloName || profile.zalo_name || profile.displayName || instance.displayName 
+            })
+            .where(eq(zaloAccounts.id, accountId));
         }
       } catch {}
 
       this.attachListener(accountId, api);
       this.io?.emit('zalo:connected', { accountId, zaloUid: ownId });
       await this.updateAccountDB(accountId, 'connected', ownId);
-      // Emit webhook (orgId lookup is async, fire-and-forget)
-      prisma.zaloAccount.findUnique({ where: { id: accountId }, select: { orgId: true } })
-        .then((rec) => rec && emitWebhook(rec.orgId, 'zalo.connected', { accountId }))
-        .catch(() => {});
+      
+      // Emit webhook
+      const acc = await db.query.zaloAccounts.findFirst({
+        where: eq(zaloAccounts.id, accountId),
+        columns: { orgId: true }
+      });
+      if (acc) emitWebhook(acc.orgId, 'zalo.connected', { accountId });
+      
     } catch (err) {
       const instance = this.instances.get(accountId);
       if (instance) instance.status = 'disconnected';
@@ -139,19 +147,25 @@ class ZaloAccountPool {
         const profiles = userInfo?.changed_profiles || {};
         const profile = profiles[ownId] || profiles[`${ownId}_0`];
         if (profile?.avatar) {
-          await prisma.zaloAccount.update({
-            where: { id: accountId },
-            data: { avatarUrl: profile.avatar, displayName: profile.zaloName || profile.zalo_name || profile.displayName || instance.displayName },
-          });
+          await db.update(zaloAccounts)
+            .set({ 
+              avatarUrl: profile.avatar, 
+              displayName: profile.zaloName || profile.zalo_name || profile.displayName || instance.displayName 
+            })
+            .where(eq(zaloAccounts.id, accountId));
         }
       } catch {}
 
       this.attachListener(accountId, api);
       await this.updateAccountDB(accountId, 'connected', ownId);
       this.io?.emit('zalo:connected', { accountId, zaloUid: ownId });
-      prisma.zaloAccount.findUnique({ where: { id: accountId }, select: { orgId: true } })
-        .then((rec) => rec && emitWebhook(rec.orgId, 'zalo.connected', { accountId }))
-        .catch(() => {});
+      
+      const acc = await db.query.zaloAccounts.findFirst({
+        where: eq(zaloAccounts.id, accountId),
+        columns: { orgId: true }
+      });
+      if (acc) emitWebhook(acc.orgId, 'zalo.connected', { accountId });
+      
     } catch (err) {
       const instance = this.instances.get(accountId);
       if (instance) instance.status = 'disconnected';
@@ -171,10 +185,14 @@ class ZaloAccountPool {
         const inst = this.instances.get(id);
         if (inst) inst.status = 'disconnected';
         this.updateAccountDB(id, 'disconnected', null);
-        // Emit webhook for disconnect (fire-and-forget)
-        prisma.zaloAccount.findUnique({ where: { id }, select: { orgId: true } })
-          .then((rec) => rec && emitWebhook(rec.orgId, 'zalo.disconnected', { accountId: id }))
-          .catch(() => {});
+        
+        // Emit webhook for disconnect
+        db.query.zaloAccounts.findFirst({
+          where: eq(zaloAccounts.id, id),
+          columns: { orgId: true }
+        }).then((acc) => {
+          if (acc) emitWebhook(acc.orgId, 'zalo.disconnected', { accountId: id });
+        }).catch(() => {});
 
         // Circuit breaker: track disconnect count per account
         const now = Date.now();
@@ -200,22 +218,22 @@ class ZaloAccountPool {
 
   // Persist session credentials to DB
   private saveCredentials(accountId: string, credentials: ZaloCredentials): void {
-    prisma.zaloAccount
-      .update({ where: { id: accountId }, data: { sessionData: credentials as any } })
+    db.update(zaloAccounts)
+      .set({ sessionData: credentials })
+      .where(eq(zaloAccounts.id, accountId))
       .catch((err) => logger.error(`[zalo:${accountId}] saveCredentials error:`, err));
   }
 
   // Sync account status and zaloUid to DB
   private async updateAccountDB(accountId: string, status: string, zaloUid: string | null): Promise<void> {
     try {
-      await prisma.zaloAccount.update({
-        where: { id: accountId },
-        data: {
+      await db.update(zaloAccounts)
+        .set({
           status,
           ...(zaloUid !== null ? { zaloUid } : {}),
           ...(status === 'connected' ? { lastConnectedAt: new Date() } : {}),
-        },
-      });
+        })
+        .where(eq(zaloAccounts.id, accountId));
     } catch (err) {
       logger.error(`[zalo:${accountId}] updateAccountDB error:`, err);
     }
@@ -228,9 +246,9 @@ class ZaloAccountPool {
     if (inst?.status === 'connected') return;
 
     try {
-      const account = await prisma.zaloAccount.findUnique({
-        where: { id: accountId },
-        select: { sessionData: true },
+      const account = await db.query.zaloAccounts.findFirst({
+        where: eq(zaloAccounts.id, accountId),
+        columns: { sessionData: true },
       });
       const session = account?.sessionData as ZaloCredentials | null;
       if (session?.imei) {

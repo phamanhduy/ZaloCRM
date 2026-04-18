@@ -2,7 +2,9 @@
  * telegram-bot.ts — Send CRM notifications via Telegram Bot API.
  * Config shape: { botToken: string, chatId: string }
  */
-import { prisma } from '../../../shared/database/prisma-client.js';
+import { db } from '../../../shared/database/db.js';
+import { contacts, messages, appointments, conversations } from '../../../shared/database/schema.js';
+import { eq, and, gte, sql, count } from 'drizzle-orm';
 import { logger } from '../../../shared/utils/logger.js';
 
 interface TelegramConfig {
@@ -24,15 +26,22 @@ export async function sendTelegramNotification(
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  const [newContacts, todayMessages, pendingAppointments] = await Promise.all([
-    prisma.contact.count({ where: { orgId, createdAt: { gte: today } } }),
-    prisma.message.count({
-      where: { conversation: { orgId }, createdAt: { gte: today } },
-    }),
-    prisma.appointment.count({
-      where: { orgId, status: 'scheduled', appointmentDate: { gte: today } },
-    }),
+  const [newContactsRes, todayMessagesRes, pendingAppointmentsRes] = await Promise.all([
+    db.select({ value: count() }).from(contacts).where(and(eq(contacts.orgId, orgId), gte(contacts.createdAt, today))),
+    db.select({ value: count() }).from(messages).where(and(
+      gte(messages.createdAt, today),
+      sql`EXISTS (SELECT 1 FROM ${conversations} WHERE ${conversations.id} = ${messages.conversationId} AND ${conversations.orgId} = ${orgId})`
+    )),
+    db.select({ value: count() }).from(appointments).where(and(
+      eq(appointments.orgId, orgId), 
+      eq(appointments.status, 'scheduled'), 
+      gte(appointments.appointmentDate, today)
+    )),
   ]);
+
+  const newContacts = newContactsRes[0].value;
+  const todayMessages = todayMessagesRes[0].value;
+  const pendingAppointments = pendingAppointmentsRes[0].value;
 
   const text = [
     '📊 *ZaloCRM — Tóm tắt hôm nay*',

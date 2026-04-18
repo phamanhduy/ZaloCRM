@@ -12,9 +12,10 @@ import { Server } from 'socket.io';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { Prisma } from '@prisma/client';
 import { config } from './config/index.js';
-import { prisma } from './shared/database/prisma-client.js';
+import { db } from './shared/database/db.js';
+import { zaloAccounts } from './shared/database/schema.js';
+import { isNotNull, sql } from 'drizzle-orm';
 import { logger } from './shared/utils/logger.js';
 import { authRoutes } from './modules/auth/auth-routes.js';
 import { zaloRoutes } from './modules/zalo/zalo-routes.js';
@@ -130,7 +131,7 @@ async function bootstrap() {
   // Liveness/readiness probe — also checks DB connectivity
   app.get('/health', async () => {
     try {
-      await prisma.$queryRaw`SELECT 1`;
+      db.get(sql`SELECT 1`);
       return { status: 'ok', db: 'connected', timestamp: new Date().toISOString() };
     } catch {
       return { status: 'error', db: 'disconnected', timestamp: new Date().toISOString() };
@@ -177,12 +178,12 @@ async function bootstrap() {
 
   // Reconnect Zalo accounts that have saved sessions
   try {
-    const accounts = await prisma.zaloAccount.findMany({
-      where: { sessionData: { not: Prisma.JsonNull } },
-      select: { id: true, sessionData: true },
+    const list = await db.query.zaloAccounts.findMany({
+      where: isNotNull(zaloAccounts.sessionData),
+      columns: { id: true, sessionData: true },
     });
-    logger.info(`Attempting reconnect for ${accounts.length} Zalo account(s)`);
-    for (const account of accounts) {
+    logger.info(`Attempting reconnect for ${list.length} Zalo account(s)`);
+    for (const account of list) {
       const session = account.sessionData as {
         cookie: any;
         imei: string;

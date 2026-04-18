@@ -3,12 +3,14 @@
  * Requires owner or admin role.
  */
 import type { FastifyInstance } from 'fastify';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { db } from '../../shared/database/db.js';
+import { contacts } from '../../shared/database/schema.js';
+import { eq, and } from 'drizzle-orm';
 import { authMiddleware } from '../auth/auth-middleware.js';
 import { requireRole } from '../auth/role-middleware.js';
 import { zaloPool } from './zalo-pool.js';
 import { logger } from '../../shared/utils/logger.js';
-import { randomUUID } from 'node:crypto';
+import { v4 as uuidv4 } from 'uuid';
 
 export async function zaloSyncRoutes(app: FastifyInstance) {
   app.addHook('preHandler', authMiddleware);
@@ -36,30 +38,28 @@ export async function zaloSyncRoutes(app: FastifyInstance) {
           const avatar = friend.avatar || '';
           const phone = friend.phoneNumber || '';
 
-          const existing = await prisma.contact.findFirst({
-            where: { zaloUid: uid, orgId: user.orgId },
+          const existing = await db.query.contacts.findFirst({
+            where: and(eq(contacts.zaloUid, uid), eq(contacts.orgId, user.orgId)),
           });
 
           if (existing) {
-            await prisma.contact.update({
-              where: { id: existing.id },
-              data: {
+            await db.update(contacts)
+              .set({
                 fullName: zaloName || existing.fullName,
                 avatarUrl: avatar || existing.avatarUrl,
                 phone: phone || existing.phone,
-              },
-            });
+                updatedAt: new Date(),
+              })
+              .where(eq(contacts.id, existing.id));
             updated++;
           } else {
-            await prisma.contact.create({
-              data: {
-                id: randomUUID(),
-                orgId: user.orgId,
-                zaloUid: uid,
-                fullName: zaloName || 'Unknown',
-                avatarUrl: avatar || null,
-                phone: phone || null,
-              },
+            await db.insert(contacts).values({
+              id: uuidv4(),
+              orgId: user.orgId,
+              zaloUid: uid,
+              fullName: zaloName || 'Unknown',
+              avatarUrl: avatar || null,
+              phone: phone || null,
             });
             created++;
           }

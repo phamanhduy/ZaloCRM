@@ -3,11 +3,14 @@
  * All routes require JWT auth and are scoped to user's org.
  */
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { db } from '../../shared/database/db.js';
+import { appSettings } from '../../shared/database/schema.js';
+import { eq, and } from 'drizzle-orm';
 import { authMiddleware } from '../auth/auth-middleware.js';
 import { logger } from '../../shared/utils/logger.js';
 import { emitWebhook } from './webhook-service.js';
 import crypto from 'node:crypto';
+import { v4 as uuidv4 } from 'uuid';
 
 export async function webhookSettingsRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', authMiddleware);
@@ -18,8 +21,8 @@ export async function webhookSettingsRoutes(app: FastifyInstance): Promise<void>
       const { orgId } = request.user!;
 
       const [urlSetting, secretSetting] = await Promise.all([
-        prisma.appSetting.findFirst({ where: { orgId, settingKey: 'webhook_url' } }),
-        prisma.appSetting.findFirst({ where: { orgId, settingKey: 'webhook_secret' } }),
+        db.query.appSettings.findFirst({ where: and(eq(appSettings.orgId, orgId), eq(appSettings.settingKey, 'webhook_url')) }),
+        db.query.appSettings.findFirst({ where: and(eq(appSettings.orgId, orgId), eq(appSettings.settingKey, 'webhook_secret')) }),
       ]);
 
       return {
@@ -58,13 +61,15 @@ export async function webhookSettingsRoutes(app: FastifyInstance): Promise<void>
     try {
       const { orgId } = request.user!;
 
-      const config = await prisma.appSetting.findFirst({ where: { orgId, settingKey: 'webhook_url' } });
-      if (!config?.valuePlain) {
+      const configSetting = await db.query.appSettings.findFirst({ 
+        where: and(eq(appSettings.orgId, orgId), eq(appSettings.settingKey, 'webhook_url')) 
+      });
+      if (!configSetting?.valuePlain) {
         return reply.status(400).send({ error: 'No webhook URL configured' });
       }
 
       await emitWebhook(orgId, 'webhook.test', { message: 'Test event from Zalo CRM', orgId });
-      return { success: true, sentTo: config.valuePlain };
+      return { success: true, sentTo: configSetting.valuePlain };
     } catch (err) {
       logger.error('[webhook-settings] Test error:', err);
       return reply.status(500).send({ error: 'Failed to send test webhook' });
@@ -91,7 +96,9 @@ export async function webhookSettingsRoutes(app: FastifyInstance): Promise<void>
     try {
       const { orgId } = request.user!;
 
-      const setting = await prisma.appSetting.findFirst({ where: { orgId, settingKey: 'public_api_key' } });
+      const setting = await db.query.appSettings.findFirst({ 
+        where: and(eq(appSettings.orgId, orgId), eq(appSettings.settingKey, 'public_api_key')) 
+      });
       if (!setting?.valuePlain) return { key: null };
 
       const k = setting.valuePlain;
@@ -108,9 +115,20 @@ export async function webhookSettingsRoutes(app: FastifyInstance): Promise<void>
 // ── Helper ────────────────────────────────────────────────────────────────────
 
 async function upsertSetting(orgId: string, settingKey: string, value: string): Promise<void> {
-  await prisma.appSetting.upsert({
-    where: { orgId_settingKey: { orgId, settingKey } },
-    create: { orgId, settingKey, valuePlain: value },
-    update: { valuePlain: value },
+  const existing = await db.query.appSettings.findFirst({ 
+    where: and(eq(appSettings.orgId, orgId), eq(appSettings.settingKey, settingKey)) 
   });
+
+  if (existing) {
+    await db.update(appSettings)
+      .set({ valuePlain: value, updatedAt: new Date() })
+      .where(and(eq(appSettings.orgId, orgId), eq(appSettings.settingKey, settingKey)));
+  } else {
+    await db.insert(appSettings).values({
+      id: uuidv4(),
+      orgId,
+      settingKey,
+      valuePlain: value
+    });
+  }
 }

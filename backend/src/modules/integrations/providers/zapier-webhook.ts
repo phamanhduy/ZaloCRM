@@ -3,7 +3,9 @@
  * Config shape: { webhookUrl: string, events?: string[] }
  * Sends latest contacts as payload to Zapier catch hook.
  */
-import { prisma } from '../../../shared/database/prisma-client.js';
+import { db } from '../../../shared/database/db.js';
+import { contacts } from '../../../shared/database/schema.js';
+import { eq, and, gte, desc } from 'drizzle-orm';
 import { logger } from '../../../shared/utils/logger.js';
 
 interface ZapierConfig {
@@ -37,25 +39,25 @@ export async function triggerZapierWebhook(
   try {
     // Send recent contacts created in last 24h
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    const contacts = await prisma.contact.findMany({
-      where: { orgId, createdAt: { gte: since } },
-      orderBy: { createdAt: 'desc' },
-      take: 100,
+    const list = await db.query.contacts.findMany({
+      where: and(eq(contacts.orgId, orgId), gte(contacts.createdAt, since)),
+      orderBy: [desc(contacts.createdAt)],
+      limit: 100,
     });
 
     const payload = {
       event: 'contacts.sync',
       orgId,
       timestamp: new Date().toISOString(),
-      count: contacts.length,
-      contacts: contacts.map((c: any) => ({
+      count: list.length,
+      contacts: list.map((c) => ({
         id: c.id,
         fullName: c.fullName,
         phone: c.phone,
         email: c.email,
         source: c.source,
         status: c.status,
-        createdAt: c.createdAt.toISOString(),
+        createdAt: c.createdAt?.toISOString() ?? '',
       })),
     };
 
@@ -72,8 +74,8 @@ export async function triggerZapierWebhook(
       return { direction: 'export', recordCount: 0, status: 'failed', errorMessage: `Zapier ${response.status}: ${body.slice(0, 200)}` };
     }
 
-    logger.info(`[zapier-webhook] Sent ${contacts.length} contacts to Zapier`);
-    return { direction: 'export', recordCount: contacts.length, status: 'success' };
+    logger.info(`[zapier-webhook] Sent ${list.length} contacts to Zapier`);
+    return { direction: 'export', recordCount: list.length, status: 'success' };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { direction: 'export', recordCount: 0, status: 'failed', errorMessage: msg };

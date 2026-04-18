@@ -4,18 +4,19 @@
  * Also runs a daily session refresh at 04:00 UTC to keep cookies fresh.
  */
 import cron from 'node-cron';
-import { Prisma } from '@prisma/client';
 import { zaloPool } from './zalo-pool.js';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { db } from '../../shared/database/db.js';
+import { zaloAccounts } from '../../shared/database/schema.js';
+import { isNotNull } from 'drizzle-orm';
 import { logger } from '../../shared/utils/logger.js';
 
 export function startZaloHealthCheck(): void {
   // Every 5 minutes: check all accounts with saved sessions
   cron.schedule('*/5 * * * *', async () => {
     try {
-      const accounts = await prisma.zaloAccount.findMany({
-        where: { sessionData: { not: Prisma.JsonNull } },
-        select: { id: true, displayName: true, sessionData: true },
+      const accounts = await db.query.zaloAccounts.findMany({
+        where: isNotNull(zaloAccounts.sessionData),
+        columns: { id: true, displayName: true, sessionData: true },
       });
 
       for (const acc of accounts) {
@@ -39,9 +40,9 @@ export function startZaloHealthCheck(): void {
   cron.schedule('0 4 * * *', async () => {
     logger.info('[health-check] Daily session refresh starting...');
     try {
-      const accounts = await prisma.zaloAccount.findMany({
-        where: { sessionData: { not: Prisma.JsonNull } },
-        select: { id: true, sessionData: true },
+      const accounts = await db.query.zaloAccounts.findMany({
+        where: isNotNull(zaloAccounts.sessionData),
+        columns: { id: true, sessionData: true },
       });
 
       for (const acc of accounts) {

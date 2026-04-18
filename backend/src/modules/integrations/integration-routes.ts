@@ -3,11 +3,14 @@
  * All routes require JWT auth, scoped to user's org.
  */
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { db } from '../../shared/database/db.js';
+import { integrations, syncLogs } from '../../shared/database/schema.js';
+import { eq, and, desc } from 'drizzle-orm';
 import { authMiddleware } from '../auth/auth-middleware.js';
 import { logger } from '../../shared/utils/logger.js';
 import { requireRole } from '../auth/role-middleware.js';
 import { runSync } from './sync-engine.js';
+import { v4 as uuidv4 } from 'uuid';
 
 const VALID_TYPES = ['google_sheets', 'telegram', 'facebook', 'zapier'] as const;
 
@@ -18,16 +21,17 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/v1/integrations', async (request: FastifyRequest, reply: FastifyReply) => {
     try {
       const { orgId } = request.user!;
-      const integrations = await prisma.integration.findMany({
-        where: { orgId },
-        orderBy: { createdAt: 'desc' },
-        select: {
-          id: true, orgId: true, type: true, name: true,
-          enabled: true, lastSyncAt: true, createdAt: true, updatedAt: true,
-          syncLogs: { take: 5, orderBy: { createdAt: 'desc' } },
+      const list = await db.query.integrations.findMany({
+        where: eq(integrations.orgId, orgId),
+        orderBy: [desc(integrations.createdAt)],
+        with: {
+          syncLogs: {
+            limit: 5,
+            orderBy: [desc(syncLogs.createdAt)],
+          },
         },
       });
-      return integrations;
+      return list;
     } catch (err) {
       logger.error('[integrations] GET list error:', err);
       return reply.status(500).send({ error: 'Failed to fetch integrations' });
@@ -46,9 +50,17 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(400).send({ error: `Invalid type. Must be one of: ${VALID_TYPES.join(', ')}` });
       }
 
-      const integration = await prisma.integration.create({
-        data: { orgId, type, name: name || type, config: (cfg ?? {}) as any, enabled: enabled ?? true },
+      const id = uuidv4();
+      await db.insert(integrations).values({
+        id,
+        orgId,
+        type,
+        name: name || type,
+        config: cfg ?? {},
+        enabled: enabled ?? true
       });
+
+      const integration = await db.query.integrations.findFirst({ where: eq(integrations.id, id) });
       return reply.status(201).send(integration);
     } catch (err) {
       logger.error('[integrations] POST create error:', err);
@@ -65,17 +77,21 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
         name?: string; config?: Record<string, unknown>; enabled?: boolean;
       };
 
-      const existing = await prisma.integration.findFirst({ where: { id, orgId } });
+      const existing = await db.query.integrations.findFirst({ 
+        where: and(eq(integrations.id, id), eq(integrations.orgId, orgId)) 
+      });
       if (!existing) return reply.status(404).send({ error: 'Integration not found' });
 
-      const updated = await prisma.integration.update({
-        where: { id },
-        data: {
+      await db.update(integrations)
+        .set({
           ...(name !== undefined && { name }),
-          ...(cfg !== undefined && { config: cfg as any }),
+          ...(cfg !== undefined && { config: cfg }),
           ...(enabled !== undefined && { enabled }),
-        },
-      });
+          updatedAt: new Date()
+        })
+        .where(eq(integrations.id, id));
+
+      const updated = await db.query.integrations.findFirst({ where: eq(integrations.id, id) });
       return updated;
     } catch (err) {
       logger.error('[integrations] PUT update error:', err);
@@ -89,10 +105,12 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
       const { orgId } = request.user!;
       const { id } = request.params as { id: string };
 
-      const existing = await prisma.integration.findFirst({ where: { id, orgId } });
+      const existing = await db.query.integrations.findFirst({ 
+        where: and(eq(integrations.id, id), eq(integrations.orgId, orgId)) 
+      });
       if (!existing) return reply.status(404).send({ error: 'Integration not found' });
 
-      await prisma.integration.delete({ where: { id } });
+      await db.delete(integrations).where(eq(integrations.id, id));
       return { success: true };
     } catch (err) {
       logger.error('[integrations] DELETE error:', err);
@@ -106,11 +124,13 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
       const { orgId } = request.user!;
       const { id } = request.params as { id: string };
 
-      const integration = await prisma.integration.findFirst({ where: { id, orgId } });
+      const integration = await db.query.integrations.findFirst({ 
+        where: and(eq(integrations.id, id), eq(integrations.orgId, orgId)) 
+      });
       if (!integration) return reply.status(404).send({ error: 'Integration not found' });
       if (!integration.enabled) return reply.status(400).send({ error: 'Integration is disabled' });
 
-      const log = await runSync(integration);
+      const log = await runSync(integration as any);
       return log;
     } catch (err) {
       logger.error('[integrations] POST sync error:', err);
@@ -124,13 +144,15 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
       const { orgId } = request.user!;
       const { id } = request.params as { id: string };
 
-      const integration = await prisma.integration.findFirst({ where: { id, orgId } });
+      const integration = await db.query.integrations.findFirst({ 
+        where: and(eq(integrations.id, id), eq(integrations.orgId, orgId)) 
+      });
       if (!integration) return reply.status(404).send({ error: 'Integration not found' });
 
-      const logs = await prisma.syncLog.findMany({
-        where: { integrationId: id },
-        orderBy: { createdAt: 'desc' },
-        take: 50,
+      const logs = await db.query.syncLogs.findMany({
+        where: eq(syncLogs.integrationId, id),
+        orderBy: [desc(syncLogs.createdAt)],
+        limit: 50,
       });
       return logs;
     } catch (err) {

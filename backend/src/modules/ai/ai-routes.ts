@@ -1,17 +1,19 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { db } from '../../shared/database/db.js';
+import { conversations, zaloAccountAccess } from '../../shared/database/schema.js';
+import { eq, and } from 'drizzle-orm';
 import { authMiddleware } from '../auth/auth-middleware.js';
 import { requireRole } from '../auth/role-middleware.js';
 import { requireZaloAccess } from '../zalo/zalo-access-middleware.js';
 import { getAiConfig, getAiUsage, updateAiConfig, generateAiOutput } from './ai-service.js';
 import { getAvailableProviders } from './provider-registry.js';
 import { logger } from '../../shared/utils/logger.js';
-import { prisma } from '../../shared/database/prisma-client.js';
 
 async function assertConversationReadAccess(request: FastifyRequest, reply: FastifyReply, conversationId: string) {
   const user = request.user!;
-  const conversation = await prisma.conversation.findFirst({
-    where: { id: conversationId, orgId: user.orgId },
-    select: { id: true, zaloAccountId: true },
+  const conversation = await db.query.conversations.findFirst({
+    where: and(eq(conversations.id, conversationId), eq(conversations.orgId, user.orgId)),
+    columns: { id: true, zaloAccountId: true },
   });
   if (!conversation) {
     reply.status(404).send({ error: 'Conversation not found' });
@@ -19,9 +21,9 @@ async function assertConversationReadAccess(request: FastifyRequest, reply: Fast
   }
   if (['owner', 'admin'].includes(user.role)) return conversation;
 
-  const access = await prisma.zaloAccountAccess.findFirst({
-    where: { zaloAccountId: conversation.zaloAccountId, userId: user.id },
-    select: { permission: true },
+  const access = await db.query.zaloAccountAccess.findFirst({
+    where: and(eq(zaloAccountAccess.zaloAccountId, conversation.zaloAccountId), eq(zaloAccountAccess.userId, user.id)),
+    columns: { permission: true },
   });
   if (!access) {
     reply.status(403).send({ error: 'Không có quyền truy cập tài khoản Zalo này' });

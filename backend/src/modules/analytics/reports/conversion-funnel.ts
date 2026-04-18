@@ -1,7 +1,9 @@
 /**
  * conversion-funnel.ts — Pipeline conversion rates: count per stage + conversion %.
  */
-import { prisma } from '../../../shared/database/prisma-client.js';
+import { db } from '../../../shared/database/db.js';
+import { contacts } from '../../../shared/database/schema.js';
+import { eq, and, gte, lt, ne, sql, count } from 'drizzle-orm';
 
 export interface FunnelStage {
   status: string;
@@ -22,22 +24,29 @@ export async function getConversionFunnel(
   from: string,
   to: string,
 ): Promise<ConversionFunnelResult> {
-  const gte = new Date(from);
-  const lt = new Date(to);
-  lt.setDate(lt.getDate() + 1);
+  const startDate = new Date(from);
+  const endDate = new Date(to);
+  endDate.setDate(endDate.getDate() + 1);
 
-  const groups = await prisma.contact.groupBy({
-    by: ['status'],
-    where: { orgId, createdAt: { gte, lt }, status: { not: null } },
-    _count: true,
-  });
+  const groups = await db.select({
+    status: contacts.status,
+    count: count(),
+  })
+  .from(contacts)
+  .where(and(
+    eq(contacts.orgId, orgId), 
+    gte(contacts.createdAt, startDate), 
+    lt(contacts.createdAt, endDate),
+    ne(contacts.status, '')
+  ))
+  .groupBy(contacts.status);
 
   const countMap: Record<string, number> = {};
   let total = 0;
   for (const g of groups) {
     const s = g.status ?? 'unknown';
-    countMap[s] = g._count;
-    total += g._count;
+    countMap[s] = g.count;
+    total += g.count;
   }
 
   const stages: FunnelStage[] = STAGE_ORDER.map((status) => ({
@@ -47,16 +56,20 @@ export async function getConversionFunnel(
   }));
 
   // Avg days from createdAt to updatedAt for converted contacts
-  const avgResult = await prisma.$queryRaw<[{ avg_days: number | null }]>`
-    SELECT AVG(EXTRACT(EPOCH FROM (updated_at - created_at)) / 86400)::float AS avg_days
-    FROM contacts
-    WHERE org_id = ${orgId}
-      AND status = 'converted'
-      AND created_at >= ${gte}
-      AND created_at < ${lt}
-  `;
+  // In SQLite, dates are stored as timestamps or strings. Drizzle-SQLite-Better-SQLite3 handles them as Date objects.
+  // We use strftime or just date difference in seconds
+  const avgResult = await db.select({
+    avgSeconds: sql<number>`AVG(CAST((julianday(${contacts.updatedAt}) - julianday(${contacts.createdAt})) * 86400 AS REAL))`
+  })
+  .from(contacts)
+  .where(and(
+    eq(contacts.orgId, orgId),
+    eq(contacts.status, 'converted'),
+    gte(contacts.createdAt, startDate),
+    lt(contacts.createdAt, endDate)
+  ));
 
-  const avgDays = avgResult[0]?.avg_days;
+  const avgDays = avgResult[0]?.avgSeconds ? avgResult[0].avgSeconds / 86400 : null;
 
   return {
     stages,

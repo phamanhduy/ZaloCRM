@@ -2,7 +2,9 @@
  * zalo-message-helpers.ts — utilities for processing incoming Zalo messages.
  * Detects content type from msgType and updates contact avatars fire-and-forget.
  */
-import { prisma } from '../../shared/database/prisma-client.js';
+import { db } from '../../shared/database/db.js';
+import { contacts } from '../../shared/database/schema.js';
+import { eq, and, isNull } from 'drizzle-orm';
 
 /**
  * Map zca-js msgType string to a normalized content type label.
@@ -28,10 +30,8 @@ export function detectContentType(msgType: string | undefined, content: any): st
  * Only updates rows where avatarUrl is currently null.
  */
 export function updateContactAvatar(zaloUid: string, avatarUrl: string): void {
-  prisma.contact
-    .updateMany({
-      where: { zaloUid, avatarUrl: null },
-      data: { avatarUrl },
-    })
+  db.update(contacts)
+    .set({ avatarUrl, updatedAt: new Date() })
+    .where(and(eq(contacts.zaloUid, zaloUid), isNull(contacts.avatarUrl)))
     .catch(() => {});
 }

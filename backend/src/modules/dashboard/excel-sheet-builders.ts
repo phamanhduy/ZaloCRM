@@ -3,7 +3,9 @@
  * Each function adds a worksheet to the provided workbook and populates it with data.
  */
 import ExcelJS from 'exceljs';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { db } from '../../shared/database/db.js';
+import { messages, conversations, contacts, appointments } from '../../shared/database/schema.js';
+import { eq, and, gte, lte, count, sql, asc } from 'drizzle-orm';
 
 export async function buildMessagesSheet(
   workbook: ExcelJS.Workbook,
@@ -19,26 +21,29 @@ export async function buildMessagesSheet(
     { header: 'Tổng', key: 'total', width: 12 },
   ];
 
-  const rows = await prisma.$queryRaw<
-    Array<{ date: Date; sent: bigint; received: bigint; total: bigint }>
-  >`
-    SELECT
-      DATE(m.sent_at) AS date,
-      COUNT(*) FILTER (WHERE m.sender_type = 'self') AS sent,
-      COUNT(*) FILTER (WHERE m.sender_type = 'contact') AS received,
-      COUNT(*) AS total
-    FROM messages m
-    JOIN conversations c ON c.id = m.conversation_id
-    WHERE c.org_id = ${orgId}
-      AND m.sent_at >= ${from}::date
-      AND m.sent_at < (${to}::date + interval '1 day')
-    GROUP BY DATE(m.sent_at)
-    ORDER BY date ASC
-  `;
+  const fromDate = new Date(from);
+  const toDate = new Date(to);
+  toDate.setHours(23, 59, 59, 999);
+
+  const rows = await db.select({
+    date: sql`strftime('%Y-%m-%d', datetime(${messages.sentAt} / 1000, 'unixepoch'))`.as('date'),
+    sent: sql`SUM(CASE WHEN ${messages.senderType} = 'self' THEN 1 ELSE 0 END)`.as('sent'),
+    received: sql`SUM(CASE WHEN ${messages.senderType} = 'contact' THEN 1 ELSE 0 END)`.as('received'),
+    total: count()
+  })
+  .from(messages)
+  .innerJoin(conversations, eq(messages.conversationId, conversations.id))
+  .where(and(
+    eq(conversations.orgId, orgId),
+    gte(messages.sentAt, fromDate),
+    lte(messages.sentAt, toDate)
+  ))
+  .groupBy(sql`date`)
+  .orderBy(asc(sql`date`));
 
   for (const r of rows) {
     sheet.addRow({
-      date: r.date instanceof Date ? r.date.toISOString().split('T')[0] : String(r.date),
+      date: r.date,
       sent: Number(r.sent),
       received: Number(r.received),
       total: Number(r.total),
@@ -58,19 +63,26 @@ export async function buildContactsSheet(
     { header: 'Liên hệ mới', key: 'count', width: 15 },
   ];
 
-  const rows = await prisma.$queryRaw<Array<{ date: Date; count: bigint }>>`
-    SELECT DATE(created_at) AS date, COUNT(*) AS count
-    FROM contacts
-    WHERE org_id = ${orgId}
-      AND created_at >= ${from}::date
-      AND created_at < (${to}::date + interval '1 day')
-    GROUP BY DATE(created_at)
-    ORDER BY date ASC
-  `;
+  const fromDate = new Date(from);
+  const toDate = new Date(to);
+  toDate.setHours(23, 59, 59, 999);
+
+  const rows = await db.select({
+    date: sql`strftime('%Y-%m-%d', datetime(${contacts.createdAt} / 1000, 'unixepoch'))`.as('date'),
+    count: count()
+  })
+  .from(contacts)
+  .where(and(
+    eq(contacts.orgId, orgId),
+    gte(contacts.createdAt, fromDate),
+    lte(contacts.createdAt, toDate)
+  ))
+  .groupBy(sql`date`)
+  .orderBy(asc(sql`date`));
 
   for (const r of rows) {
     sheet.addRow({
-      date: r.date instanceof Date ? r.date.toISOString().split('T')[0] : String(r.date),
+      date: r.date,
       count: Number(r.count),
     });
   }
@@ -88,14 +100,23 @@ export async function buildAppointmentsSheet(
     { header: 'Số lượng', key: 'count', width: 12 },
   ];
 
-  const dateFilter = { gte: new Date(from), lte: new Date(to) };
-  const stats = await prisma.appointment.groupBy({
-    by: ['status'],
-    where: { orgId, appointmentDate: dateFilter },
-    _count: true,
-  });
+  const fromDate = new Date(from);
+  const toDate = new Date(to);
+  toDate.setHours(23, 59, 59, 999);
+
+  const stats = await db.select({
+    status: appointments.status,
+    count: count()
+  })
+  .from(appointments)
+  .where(and(
+    eq(appointments.orgId, orgId),
+    gte(appointments.appointmentDate, fromDate),
+    lte(appointments.appointmentDate, toDate)
+  ))
+  .groupBy(appointments.status);
 
   for (const s of stats) {
-    sheet.addRow({ status: s.status, count: s._count });
+    sheet.addRow({ status: s.status, count: s.count });
   }
 }

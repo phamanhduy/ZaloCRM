@@ -1,9 +1,11 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { randomUUID } from 'node:crypto';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { db } from '../../shared/database/db.js';
+import { automationRules } from '../../shared/database/schema.js';
+import { eq, and, desc } from 'drizzle-orm';
 import { authMiddleware } from '../auth/auth-middleware.js';
 import { requireRole } from '../auth/role-middleware.js';
 import { logger } from '../../shared/utils/logger.js';
+import { v4 as uuidv4 } from 'uuid';
 
 const VALID_TRIGGERS = ['message_received', 'contact_created', 'status_changed'];
 
@@ -12,9 +14,9 @@ export async function automationRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/v1/automation/rules', async (request: FastifyRequest) => {
     const user = request.user!;
-    const rules = await prisma.automationRule.findMany({
-      where: { orgId: user.orgId },
-      orderBy: [{ priority: 'desc' }, { createdAt: 'desc' }],
+    const rules = await db.query.automationRules.findMany({
+      where: eq(automationRules.orgId, user.orgId),
+      orderBy: [desc(automationRules.priority), desc(automationRules.createdAt)],
     });
     return { rules };
   });
@@ -25,19 +27,21 @@ export async function automationRoutes(app: FastifyInstance): Promise<void> {
       const body = request.body as Record<string, any>;
       if (!body.name || typeof body.name !== 'string') return reply.status(400).send({ error: 'name is required' });
       if (!body.trigger || !VALID_TRIGGERS.includes(body.trigger)) return reply.status(400).send({ error: `trigger must be one of: ${VALID_TRIGGERS.join(', ')}` });
-      const rule = await prisma.automationRule.create({
-        data: {
-          id: randomUUID(),
-          orgId: user.orgId,
-          name: body.name,
-          description: body.description,
-          trigger: body.trigger,
-          conditions: Array.isArray(body.conditions) ? body.conditions : [],
-          actions: Array.isArray(body.actions) ? body.actions : [],
-          enabled: body.enabled ?? true,
-          priority: Number(body.priority ?? 0),
-        },
+      
+      const id = uuidv4();
+      await db.insert(automationRules).values({
+        id,
+        orgId: user.orgId,
+        name: body.name,
+        description: body.description,
+        trigger: body.trigger,
+        conditions: Array.isArray(body.conditions) ? body.conditions : [],
+        actions: Array.isArray(body.actions) ? body.actions : [],
+        enabled: body.enabled ?? true,
+        priority: Number(body.priority ?? 0),
       });
+
+      const rule = await db.query.automationRules.findFirst({ where: eq(automationRules.id, id) });
       return reply.status(201).send(rule);
     } catch (error) {
       logger.error('[automation] Create rule error:', error);
@@ -51,12 +55,15 @@ export async function automationRoutes(app: FastifyInstance): Promise<void> {
       const { id } = request.params as { id: string };
       const body = request.body as Record<string, any>;
       if (body.trigger && !VALID_TRIGGERS.includes(body.trigger)) return reply.status(400).send({ error: `trigger must be one of: ${VALID_TRIGGERS.join(', ')}` });
-      const existing = await prisma.automationRule.findFirst({ where: { id, orgId: user.orgId }, select: { id: true } });
+      
+      const existing = await db.query.automationRules.findFirst({ 
+        where: and(eq(automationRules.id, id), eq(automationRules.orgId, user.orgId)), 
+        columns: { id: true } 
+      });
       if (!existing) return reply.status(404).send({ error: 'Automation rule not found' });
 
-      const rule = await prisma.automationRule.update({
-        where: { id },
-        data: {
+      await db.update(automationRules)
+        .set({
           name: body.name,
           description: body.description,
           trigger: body.trigger,
@@ -64,8 +71,11 @@ export async function automationRoutes(app: FastifyInstance): Promise<void> {
           actions: Array.isArray(body.actions) ? body.actions : undefined,
           enabled: body.enabled,
           priority: body.priority !== undefined ? Number(body.priority) : undefined,
-        },
-      });
+          updatedAt: new Date()
+        })
+        .where(eq(automationRules.id, id));
+
+      const rule = await db.query.automationRules.findFirst({ where: eq(automationRules.id, id) });
       return rule;
     } catch (error) {
       logger.error('[automation] Update rule error:', error);
@@ -77,9 +87,14 @@ export async function automationRoutes(app: FastifyInstance): Promise<void> {
     try {
       const user = request.user!;
       const { id } = request.params as { id: string };
-      const existing = await prisma.automationRule.findFirst({ where: { id, orgId: user.orgId }, select: { id: true } });
+      
+      const existing = await db.query.automationRules.findFirst({ 
+        where: and(eq(automationRules.id, id), eq(automationRules.orgId, user.orgId)), 
+        columns: { id: true } 
+      });
       if (!existing) return reply.status(404).send({ error: 'Automation rule not found' });
-      await prisma.automationRule.delete({ where: { id } });
+      
+      await db.delete(automationRules).where(eq(automationRules.id, id));
       return { success: true };
     } catch (error) {
       logger.error('[automation] Delete rule error:', error);

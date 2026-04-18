@@ -5,7 +5,9 @@
  */
 import cron from 'node-cron';
 import type { Server } from 'socket.io';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { db } from '../../shared/database/db.js';
+import { appointments } from '../../shared/database/schema.js';
+import { eq, and, gte, lte } from 'drizzle-orm';
 import { logger } from '../../shared/utils/logger.js';
 
 export function startAppointmentReminder(io: Server): void {
@@ -19,19 +21,20 @@ export function startAppointmentReminder(io: Server): void {
       const startOfDay = new Date(tomorrow.getFullYear(), tomorrow.getMonth(), tomorrow.getDate(), 0, 0, 0);
       const endOfDay = new Date(tomorrow.getFullYear(), tomorrow.getMonth(), tomorrow.getDate(), 23, 59, 59, 999);
 
-      const appointments = await prisma.appointment.findMany({
-        where: {
-          appointmentDate: { gte: startOfDay, lte: endOfDay },
-          status: 'scheduled',
-          reminderSent: false,
-        },
-        include: {
-          contact: { select: { fullName: true, phone: true } },
-          assignedUser: { select: { id: true, fullName: true } },
+      const items = await db.query.appointments.findMany({
+        where: and(
+          gte(appointments.appointmentDate, startOfDay),
+          lte(appointments.appointmentDate, endOfDay),
+          eq(appointments.status, 'scheduled'),
+          eq(appointments.reminderSent, false),
+        ),
+        with: {
+          contact: { columns: { fullName: true, phone: true } },
+          assignedUser: { columns: { id: true, fullName: true } },
         },
       });
 
-      for (const apt of appointments) {
+      for (const apt of items) {
         io.emit('appointment:reminder', {
           appointmentId: apt.id,
           contactName: apt.contact.fullName,
@@ -43,13 +46,12 @@ export function startAppointmentReminder(io: Server): void {
           assignedUserName: apt.assignedUser?.fullName,
         });
 
-        await prisma.appointment.update({
-          where: { id: apt.id },
-          data: { reminderSent: true },
-        });
+        await db.update(appointments)
+          .set({ reminderSent: true, updatedAt: new Date() })
+          .where(eq(appointments.id, apt.id));
       }
 
-      logger.info(`[reminder] Sent ${appointments.length} reminder(s)`);
+      logger.info(`[reminder] Sent ${items.length} reminder(s)`);
     } catch (err) {
       logger.error('[reminder] Cron job error:', err);
     }

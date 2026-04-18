@@ -1,4 +1,6 @@
-import { prisma } from '../../shared/database/prisma-client.js';
+import { db } from '../../shared/database/db.js';
+import { aiConfigs, aiSuggestions, appSettings, conversations, messages, contacts } from '../../shared/database/schema.js';
+import { eq, and, gte, desc, count, sql } from 'drizzle-orm';
 import { config } from '../../config/index.js';
 import { getProviderConfig, getAvailableProviders } from './provider-registry.js';
 import { generateWithAnthropic } from './providers/anthropic.js';
@@ -7,6 +9,7 @@ import { generateWithOpenaiCompat } from './providers/openai-compat.js';
 import { buildReplyDraftPrompt } from './prompts/reply-draft.js';
 import { buildSummaryPrompt } from './prompts/summary.js';
 import { buildSentimentPrompt } from './prompts/sentiment.js';
+import { v4 as uuidv4 } from 'uuid';
 
 export type AiTaskType = 'reply_draft' | 'summary' | 'sentiment';
 
@@ -39,18 +42,24 @@ async function getProviderApiKey(orgId: string, provider: string) {
   if (providerDef?.authToken) return providerDef.authToken;
 
   /* 2. Fallback: per-org DB setting */
-  const setting = await prisma.appSetting.findFirst({
-    where: { orgId, settingKey: `ai_${provider}_api_key` },
+  const setting = await db.query.appSettings.findFirst({
+    where: and(eq(appSettings.orgId, orgId), eq(appSettings.settingKey, `ai_${provider}_api_key`)),
   });
   return setting?.valuePlain || '';
 }
 
 export async function getAiConfig(orgId: string) {
-  let aiConfig = await prisma.aiConfig.findUnique({ where: { orgId } });
+  let aiConfig = await db.query.aiConfigs.findFirst({ where: eq(aiConfigs.orgId, orgId) });
   if (!aiConfig) {
-    aiConfig = await prisma.aiConfig.create({
-      data: { orgId, provider: config.aiDefaultProvider, model: config.aiDefaultModel, maxDaily: 500, enabled: true },
+    await db.insert(aiConfigs).values({
+      id: uuidv4(),
+      orgId,
+      provider: config.aiDefaultProvider,
+      model: config.aiDefaultModel,
+      maxDaily: 500,
+      enabled: true
     });
+    aiConfig = await db.query.aiConfigs.findFirst({ where: eq(aiConfigs.orgId, orgId) });
   }
   const availableProviders = getAvailableProviders();
   const hasKey = async (p: string) => !!(await getProviderApiKey(orgId, p));
@@ -59,47 +68,56 @@ export async function getAiConfig(orgId: string) {
 }
 
 export async function updateAiConfig(orgId: string, input: { provider?: string; model?: string; maxDaily?: number; enabled?: boolean }) {
-  return prisma.aiConfig.upsert({
-    where: { orgId },
-    create: {
+  const existing = await db.query.aiConfigs.findFirst({ where: eq(aiConfigs.orgId, orgId) });
+  if (existing) {
+    return db.update(aiConfigs)
+      .set({
+        provider: input.provider,
+        model: input.model,
+        maxDaily: input.maxDaily,
+        enabled: input.enabled,
+        updatedAt: new Date()
+      })
+      .where(eq(aiConfigs.orgId, orgId));
+  } else {
+    return db.insert(aiConfigs).values({
+      id: uuidv4(),
       orgId,
       provider: input.provider || config.aiDefaultProvider,
       model: input.model || config.aiDefaultModel,
       maxDaily: input.maxDaily ?? 500,
       enabled: input.enabled ?? true,
-    },
-    update: {
-      provider: input.provider,
-      model: input.model,
-      maxDaily: input.maxDaily,
-      enabled: input.enabled,
-    },
-  });
+    });
+  }
 }
 
 export async function getAiUsage(orgId: string) {
   const currentConfig = await getAiConfig(orgId);
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
-  const usedToday = await prisma.aiSuggestion.count({ where: { orgId, createdAt: { gte: startOfDay } } });
+  const usedTodayRes = await db.select({ value: count() })
+    .from(aiSuggestions)
+    .where(and(eq(aiSuggestions.orgId, orgId), gte(aiSuggestions.createdAt, startOfDay)));
+
+  const usedToday = usedTodayRes[0].value;
   return {
     usedToday,
-    maxDaily: currentConfig.maxDaily,
-    remaining: Math.max(0, currentConfig.maxDaily - usedToday),
-    enabled: currentConfig.enabled,
+    maxDaily: currentConfig?.maxDaily || 500,
+    remaining: Math.max(0, (currentConfig?.maxDaily || 500) - usedToday),
+    enabled: currentConfig?.enabled ?? true,
   };
 }
 
 async function loadConversation(conversationId: string, orgId: string) {
-  const conversation = await prisma.conversation.findFirst({
-    where: { id: conversationId, orgId },
-    include: {
-      contact: { select: { fullName: true } },
+  const conversation = await db.query.conversations.findFirst({
+    where: and(eq(conversations.id, conversationId), eq(conversations.orgId, orgId)),
+    with: {
+      contact: { columns: { fullName: true } },
       messages: {
-        where: { isDeleted: false },
-        orderBy: { sentAt: 'desc' },
-        take: 40,
-        select: { senderType: true, senderName: true, content: true, sentAt: true },
+        where: eq(messages.isDeleted, false),
+        orderBy: [desc(messages.sentAt)],
+        limit: 40,
+        columns: { senderType: true, senderName: true, content: true, sentAt: true },
       },
     },
   });
@@ -123,15 +141,14 @@ async function generateText(provider: string, apiKey: string, model: string, sys
 }
 
 async function saveSuggestion(input: { orgId: string; conversationId: string; messageId?: string; type: AiTaskType; content: string; confidence: number }) {
-  return prisma.aiSuggestion.create({
-    data: {
-      orgId: input.orgId,
-      conversationId: input.conversationId,
-      messageId: input.messageId,
-      type: input.type,
-      content: input.content,
-      confidence: input.confidence,
-    },
+  return db.insert(aiSuggestions).values({
+    id: uuidv4(),
+    orgId: input.orgId,
+    conversationId: input.conversationId,
+    messageId: input.messageId,
+    type: input.type,
+    content: input.content,
+    confidence: input.confidence,
   });
 }
 
@@ -141,23 +158,31 @@ export async function generateAiOutput(input: { orgId: string; conversationId: s
     loadConversation(input.conversationId, input.orgId),
   ]);
 
-  if (!currentConfig.enabled) throw new Error('AI is disabled for this organization');
+  if (!currentConfig?.enabled || !currentConfig.provider || !currentConfig.model) {
+    throw new Error('AI is disabled or not properly configured');
+  }
 
-  // Atomic quota check — count inside transaction to prevent TOCTOU race
+  // Atomic quota check
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
-  const withinQuota = await prisma.$transaction(async (tx) => {
-    const usedToday = await tx.aiSuggestion.count({ where: { orgId: input.orgId, createdAt: { gte: startOfDay } } });
-    return usedToday < currentConfig.maxDaily;
+
+  const withinQuota = db.transaction((tx) => {
+    const usedTodayRes = tx.select({ value: count() })
+      .from(aiSuggestions)
+      .where(and(eq(aiSuggestions.orgId, input.orgId), gte(aiSuggestions.createdAt, startOfDay)))
+      .all();
+
+    return usedTodayRes[0].value < (currentConfig?.maxDaily || 500);
   });
+
   if (!withinQuota) throw new Error('AI daily quota exceeded');
 
   const apiKey = await getProviderApiKey(input.orgId, currentConfig.provider);
   if (!apiKey) throw new Error('AI provider key is not configured');
 
-  const contextText = buildConversationContext(conversation.messages);
+  const contextText = buildConversationContext(conversation.messages as any);
   const language = detectLanguage(contextText);
-  const customerName = conversation.contact?.fullName || 'customer';
+  const customerName = (conversation as any).contact?.fullName || 'customer';
   const userPrompt = [
     `<conversation_context>`,
     `Customer: ${customerName}`,

@@ -2,19 +2,21 @@
  * webhook-service.ts — fire-and-forget webhook delivery for org-configured endpoints.
  * Signs payloads with HMAC-SHA256 if webhook_secret is configured.
  */
-import { prisma } from '../../shared/database/prisma-client.js';
+import { db } from '../../shared/database/db.js';
+import { appSettings } from '../../shared/database/schema.js';
+import { eq, and } from 'drizzle-orm';
 import { logger } from '../../shared/utils/logger.js';
 import crypto from 'node:crypto';
 
 export async function emitWebhook(orgId: string, event: string, data: any): Promise<void> {
   try {
-    const config = await prisma.appSetting.findFirst({
-      where: { orgId, settingKey: 'webhook_url' },
+    const configSetting = await db.query.appSettings.findFirst({
+      where: and(eq(appSettings.orgId, orgId), eq(appSettings.settingKey, 'webhook_url')),
     });
-    if (!config?.valuePlain) return;
+    if (!configSetting?.valuePlain) return;
 
-    const secretSetting = await prisma.appSetting.findFirst({
-      where: { orgId, settingKey: 'webhook_secret' },
+    const secretSetting = await db.query.appSettings.findFirst({
+      where: and(eq(appSettings.orgId, orgId), eq(appSettings.settingKey, 'webhook_secret')),
     });
 
     const payload = JSON.stringify({ event, timestamp: new Date().toISOString(), data });
@@ -23,7 +25,7 @@ export async function emitWebhook(orgId: string, event: string, data: any): Prom
       : '';
 
     // Fire and forget — never block the caller
-    fetch(config.valuePlain, {
+    fetch(configSetting.valuePlain, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

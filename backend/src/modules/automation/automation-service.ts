@@ -1,4 +1,6 @@
-import { prisma } from '../../shared/database/prisma-client.js';
+import { db } from '../../shared/database/db.js';
+import { automationRules, conversations } from '../../shared/database/schema.js';
+import { eq, and, desc, asc, sql } from 'drizzle-orm';
 import { logger } from '../../shared/utils/logger.js';
 import { assignUserAction } from './actions/assign-user-action.js';
 import { updateStatusAction } from './actions/update-status-action.js';
@@ -41,9 +43,13 @@ export async function runAutomationRules(context: AutomationContext): Promise<vo
     return;
   }
 
-  const rules = await prisma.automationRule.findMany({
-    where: { orgId: context.orgId, trigger: context.trigger, enabled: true },
-    orderBy: [{ priority: 'desc' }, { createdAt: 'asc' }],
+  const rules = await db.query.automationRules.findMany({
+    where: and(
+      eq(automationRules.orgId, context.orgId), 
+      eq(automationRules.trigger, context.trigger), 
+      eq(automationRules.enabled, true)
+    ),
+    orderBy: [desc(automationRules.priority), asc(automationRules.createdAt)],
   });
 
   for (const rule of rules) {
@@ -56,10 +62,13 @@ export async function runAutomationRules(context: AutomationContext): Promise<vo
         await executeAction(action, context);
       }
 
-      await prisma.automationRule.update({
-        where: { id: rule.id },
-        data: { runCount: { increment: 1 }, lastRunAt: new Date() },
-      });
+      await db.update(automationRules)
+        .set({ 
+          runCount: sql`${automationRules.runCount} + 1`, 
+          lastRunAt: new Date(),
+          updatedAt: new Date()
+        })
+        .where(eq(automationRules.id, rule.id));
     } catch (error) {
       logger.error(`[automation] Rule "${rule.name}" (${rule.id}) execution failed:`, error);
     }
@@ -131,14 +140,17 @@ async function executeAction(action: AutomationAction, context: AutomationContex
       zaloAccountId: context.conversation.zaloAccountId,
       threadId: context.conversation.threadId ?? null,
       threadType: context.conversation.threadType ?? 'user',
-      context: { org: context.org, contact: context.contact, conversation: context.conversation },
+      context: { org: context.org as any, contact: context.contact as any, conversation: context.conversation as any },
     });
 
     if (sentMessage) {
-      await prisma.conversation.update({
-        where: { id: context.conversation.id },
-        data: { lastMessageAt: new Date(), isReplied: true, unreadCount: 0 },
-      });
+      await db.update(conversations)
+        .set({ 
+          lastMessageAt: new Date(), 
+          isReplied: true, 
+          unreadCount: 0 
+        })
+        .where(eq(conversations.id, context.conversation.id));
     }
   }
 }

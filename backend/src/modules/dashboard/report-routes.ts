@@ -5,7 +5,9 @@
  */
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import ExcelJS from 'exceljs';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { db } from '../../shared/database/db.js';
+import { messages, conversations, contacts, appointments } from '../../shared/database/schema.js';
+import { eq, and, gte, lt, lte, count, sql, asc, desc } from 'drizzle-orm';
 import { authMiddleware } from '../auth/auth-middleware.js';
 import { logger } from '../../shared/utils/logger.js';
 import {
@@ -34,25 +36,28 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
       const from = query.from || defaultFrom;
       const to = query.to || defaultTo;
 
-      const rows = await prisma.$queryRaw<
-        Array<{ date: Date; sent: bigint; received: bigint; total: bigint }>
-      >`
-        SELECT
-          DATE(m.sent_at) AS date,
-          COUNT(*) FILTER (WHERE m.sender_type = 'self') AS sent,
-          COUNT(*) FILTER (WHERE m.sender_type = 'contact') AS received,
-          COUNT(*) AS total
-        FROM messages m
-        JOIN conversations c ON c.id = m.conversation_id
-        WHERE c.org_id = ${orgId}
-          AND m.sent_at >= ${from}::date
-          AND m.sent_at < (${to}::date + interval '1 day')
-        GROUP BY DATE(m.sent_at)
-        ORDER BY date ASC
-      `;
+      const fromDate = new Date(from);
+      const toDate = new Date(to);
+      toDate.setHours(23, 59, 59, 999);
 
-      const data = rows.map((r) => ({
-        date: r.date instanceof Date ? r.date.toISOString().split('T')[0] : String(r.date),
+      const rows = await db.select({
+        date: sql`strftime('%Y-%m-%d', datetime(${messages.sentAt} / 1000, 'unixepoch'))`.as('date'),
+        sent: sql`SUM(CASE WHEN ${messages.senderType} = 'self' THEN 1 ELSE 0 END)`.as('sent'),
+        received: sql`SUM(CASE WHEN ${messages.senderType} = 'contact' THEN 1 ELSE 0 END)`.as('received'),
+        total: count()
+      })
+      .from(messages)
+      .innerJoin(conversations, eq(messages.conversationId, conversations.id))
+      .where(and(
+        eq(conversations.orgId, orgId),
+        gte(messages.sentAt, fromDate),
+        lte(messages.sentAt, toDate)
+      ))
+      .groupBy(sql`date`)
+      .orderBy(asc(sql`date`));
+
+      const data = rows.map((r: any) => ({
+        date: r.date,
         sent: Number(r.sent),
         received: Number(r.received),
         total: Number(r.total),
@@ -74,33 +79,43 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
       const from = query.from || defaultFrom;
       const to = query.to || defaultTo;
 
+      const fromDate = new Date(from);
+      const toDate = new Date(to);
+      toDate.setHours(23, 59, 59, 999);
+
       const [newPerDay, statusDist] = await Promise.all([
-        prisma.$queryRaw<Array<{ date: Date; count: bigint }>>`
-          SELECT DATE(created_at) AS date, COUNT(*) AS count
-          FROM contacts
-          WHERE org_id = ${orgId}
-            AND created_at >= ${from}::date
-            AND created_at < (${to}::date + interval '1 day')
-          GROUP BY DATE(created_at)
-          ORDER BY date ASC
-        `,
-        prisma.contact.groupBy({
-          by: ['status'],
-          where: { orgId, status: { not: null } },
-          _count: true,
-        }),
+        db.select({
+          date: sql`strftime('%Y-%m-%d', datetime(${contacts.createdAt} / 1000, 'unixepoch'))`.as('date'),
+          count: count()
+        })
+        .from(contacts)
+        .where(and(
+          eq(contacts.orgId, orgId),
+          gte(contacts.createdAt, fromDate),
+          lte(contacts.createdAt, toDate)
+        ))
+        .groupBy(sql`date`)
+        .orderBy(asc(sql`date`)),
+        
+        db.select({
+          status: contacts.status,
+          count: count()
+        })
+        .from(contacts)
+        .where(and(eq(contacts.orgId, orgId), sql`${contacts.status} IS NOT NULL`))
+        .groupBy(contacts.status),
       ]);
 
       return {
         from,
         to,
-        newPerDay: newPerDay.map((r) => ({
-          date: r.date instanceof Date ? r.date.toISOString().split('T')[0] : String(r.date),
+        newPerDay: newPerDay.map((r: any) => ({
+          date: r.date,
           count: Number(r.count),
         })),
         byStatus: statusDist.map((s) => ({
           status: s.status,
-          count: s._count,
+          count: s.count,
         })),
       };
     } catch (err) {
@@ -118,25 +133,41 @@ export async function reportRoutes(app: FastifyInstance): Promise<void> {
       const from = query.from || defaultFrom;
       const to = query.to || defaultTo;
 
-      const dateFilter = { gte: new Date(from), lte: new Date(to) };
+      const fromDate = new Date(from);
+      const toDate = new Date(to);
+      toDate.setHours(23, 59, 59, 999);
+      
       const [byStatus, byType] = await Promise.all([
-        prisma.appointment.groupBy({
-          by: ['status'],
-          where: { orgId, appointmentDate: dateFilter },
-          _count: true,
-        }),
-        prisma.appointment.groupBy({
-          by: ['type'],
-          where: { orgId, appointmentDate: dateFilter },
-          _count: true,
-        }),
+        db.select({
+          status: appointments.status,
+          count: count()
+        })
+        .from(appointments)
+        .where(and(
+          eq(appointments.orgId, orgId),
+          gte(appointments.appointmentDate, fromDate),
+          lte(appointments.appointmentDate, toDate)
+        ))
+        .groupBy(appointments.status),
+        
+        db.select({
+          type: appointments.type,
+          count: count()
+        })
+        .from(appointments)
+        .where(and(
+          eq(appointments.orgId, orgId),
+          gte(appointments.appointmentDate, fromDate),
+          lte(appointments.appointmentDate, toDate)
+        ))
+        .groupBy(appointments.type),
       ]);
 
       return {
         from,
         to,
-        byStatus: byStatus.map((s) => ({ status: s.status, count: s._count })),
-        byType: byType.map((t) => ({ type: t.type, count: t._count })),
+        byStatus: byStatus.map((s) => ({ status: s.status, count: s.count })),
+        byType: byType.map((t) => ({ type: t.type, count: t.count })),
       };
     } catch (err) {
       logger.error('[reports] Appointments error:', err);

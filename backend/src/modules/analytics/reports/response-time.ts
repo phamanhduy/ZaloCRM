@@ -2,7 +2,9 @@
  * response-time.ts — Average response time analysis from DailyMessageStat.
  * Daily trend, overall avg, and per-user breakdown.
  */
-import { prisma } from '../../../shared/database/prisma-client.js';
+import { db } from '../../../shared/database/db.js';
+import { dailyMessageStats, users } from '../../../shared/database/schema.js';
+import { eq, and, gte, lte, isNotNull, sql, asc } from 'drizzle-orm';
 
 export interface DailyResponseTime {
   date: string;
@@ -26,50 +28,66 @@ export async function getResponseTimeAnalysis(
   from: string,
   to: string,
 ): Promise<ResponseTimeResult> {
+  const fromDate = new Date(from);
+  const toDate = new Date(to);
+  toDate.setHours(23, 59, 59, 999);
+
   const [dailyRows, overallRows, userRows] = await Promise.all([
     // Daily avg
-    prisma.$queryRaw<Array<{ stat_date: Date; avg_rt: number }>>`
-      SELECT stat_date, AVG(avg_response_time_seconds)::float AS avg_rt
-      FROM daily_message_stats
-      WHERE org_id = ${orgId}
-        AND stat_date >= ${from}::date AND stat_date <= ${to}::date
-        AND avg_response_time_seconds IS NOT NULL
-      GROUP BY stat_date
-      ORDER BY stat_date ASC
-    `,
+    db.select({
+      statDate: dailyMessageStats.statDate,
+      avgRt: sql<number>`AVG(${dailyMessageStats.avgResponseTimeSeconds})`.as('avgRt')
+    })
+    .from(dailyMessageStats)
+    .where(and(
+      eq(dailyMessageStats.orgId, orgId),
+      gte(dailyMessageStats.statDate, fromDate),
+      lte(dailyMessageStats.statDate, toDate),
+      isNotNull(dailyMessageStats.avgResponseTimeSeconds)
+    ))
+    .groupBy(dailyMessageStats.statDate)
+    .orderBy(asc(dailyMessageStats.statDate)),
+
     // Overall avg
-    prisma.$queryRaw<[{ avg_rt: number | null }]>`
-      SELECT AVG(avg_response_time_seconds)::float AS avg_rt
-      FROM daily_message_stats
-      WHERE org_id = ${orgId}
-        AND stat_date >= ${from}::date AND stat_date <= ${to}::date
-        AND avg_response_time_seconds IS NOT NULL
-    `,
+    db.select({
+      avgRt: sql<number>`AVG(${dailyMessageStats.avgResponseTimeSeconds})`
+    })
+    .from(dailyMessageStats)
+    .where(and(
+      eq(dailyMessageStats.orgId, orgId),
+      gte(dailyMessageStats.statDate, fromDate),
+      lte(dailyMessageStats.statDate, toDate),
+      isNotNull(dailyMessageStats.avgResponseTimeSeconds)
+    )),
+
     // Per-user avg
-    prisma.$queryRaw<Array<{ user_id: string; full_name: string; avg_rt: number }>>`
-      SELECT d.user_id, u.full_name, AVG(d.avg_response_time_seconds)::float AS avg_rt
-      FROM daily_message_stats d
-      JOIN users u ON u.id = d.user_id
-      WHERE d.org_id = ${orgId}
-        AND d.stat_date >= ${from}::date AND d.stat_date <= ${to}::date
-        AND d.avg_response_time_seconds IS NOT NULL
-      GROUP BY d.user_id, u.full_name
-      ORDER BY avg_rt ASC
-    `,
+    db.select({
+      userId: dailyMessageStats.userId,
+      fullName: users.fullName,
+      avgRt: sql<number>`AVG(${dailyMessageStats.avgResponseTimeSeconds})`.as('avgRt')
+    })
+    .from(dailyMessageStats)
+    .innerJoin(users, eq(users.id, dailyMessageStats.userId))
+    .where(and(
+      eq(dailyMessageStats.orgId, orgId),
+      gte(dailyMessageStats.statDate, fromDate),
+      lte(dailyMessageStats.statDate, toDate),
+      isNotNull(dailyMessageStats.avgResponseTimeSeconds)
+    ))
+    .groupBy(dailyMessageStats.userId, users.fullName)
+    .orderBy(asc(sql`avgRt`)),
   ]);
 
   return {
     daily: dailyRows.map((r) => ({
-      date: r.stat_date instanceof Date
-        ? r.stat_date.toISOString().split('T')[0]
-        : String(r.stat_date),
-      avgSeconds: Math.round(r.avg_rt),
+      date: typeof r.statDate === 'string' ? r.statDate : (r.statDate as any).toISOString().split('T')[0],
+      avgSeconds: Math.round(r.avgRt),
     })),
-    overall: overallRows[0]?.avg_rt ? Math.round(overallRows[0].avg_rt) : null,
+    overall: overallRows[0]?.avgRt ? Math.round(overallRows[0].avgRt) : null,
     byUser: userRows.map((r) => ({
-      userId: r.user_id,
-      fullName: r.full_name,
-      avgSeconds: Math.round(r.avg_rt),
+      userId: r.userId!,
+      fullName: r.fullName!,
+      avgSeconds: Math.round(r.avgRt),
     })),
   };
 }

@@ -4,8 +4,11 @@
  * All routes prefixed /api/public/ — no JWT required, orgId injected from API key lookup.
  */
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { db } from '../../shared/database/db.js';
+import { appSettings, contacts, conversations, messages, appointments, zaloAccounts } from '../../shared/database/schema.js';
+import { eq, and, or, like, desc, gte, lte, sql } from 'drizzle-orm';
 import { logger } from '../../shared/utils/logger.js';
+import { v4 as uuidv4 } from 'uuid';
 
 // ── API key auth middleware ────────────────────────────────────────────────────
 
@@ -13,8 +16,8 @@ async function apiKeyAuth(request: FastifyRequest, reply: FastifyReply) {
   const apiKey = request.headers['x-api-key'] as string;
   if (!apiKey) return reply.status(401).send({ error: 'API key required' });
 
-  const setting = await prisma.appSetting.findFirst({
-    where: { settingKey: 'public_api_key', valuePlain: apiKey },
+  const setting = await db.query.appSettings.findFirst({
+    where: and(eq(appSettings.settingKey, 'public_api_key'), eq(appSettings.valuePlain, apiKey)),
   });
   if (!setting) return reply.status(401).send({ error: 'Invalid API key' });
 
@@ -33,28 +36,32 @@ export async function publicApiRoutes(app: FastifyInstance): Promise<void> {
       const orgId = (request as any).orgId as string;
       const { search = '', status = '', limit = '20' } = request.query as Record<string, string>;
 
-      const where: any = { orgId };
-      if (status) where.status = status;
+      let filters = eq(contacts.orgId, orgId);
+      if (status) filters = and(filters, eq(contacts.status, status)) as any;
       if (search) {
-        where.OR = [
-          { fullName: { contains: search, mode: 'insensitive' } },
-          { phone: { contains: search } },
-          { email: { contains: search, mode: 'insensitive' } },
-        ];
+        const pattern = `%${search}%`;
+        filters = and(
+          filters,
+          or(
+            like(contacts.fullName, pattern),
+            like(contacts.phone, pattern),
+            like(contacts.email, pattern)
+          )
+        ) as any;
       }
 
-      const contacts = await prisma.contact.findMany({
-        where,
-        select: {
+      const list = await db.query.contacts.findMany({
+        where: filters,
+        columns: {
           id: true, fullName: true, phone: true, email: true,
           source: true, status: true, notes: true, tags: true,
           createdAt: true, updatedAt: true,
         },
-        orderBy: { updatedAt: 'desc' },
-        take: Math.min(parseInt(limit) || 20, 100),
+        orderBy: [desc(contacts.updatedAt)],
+        limit: Math.min(parseInt(limit) || 20, 100),
       });
 
-      return { contacts };
+      return { contacts: list };
     } catch (err) {
       logger.error('[public-api] GET /contacts error:', err);
       return reply.status(500).send({ error: 'Failed to fetch contacts' });
@@ -66,16 +73,22 @@ export async function publicApiRoutes(app: FastifyInstance): Promise<void> {
       const orgId = (request as any).orgId as string;
       const { id } = request.params as { id: string };
 
-      const contact = await prisma.contact.findFirst({
-        where: { id, orgId },
-        include: {
-          appointments: { orderBy: { appointmentDate: 'desc' }, take: 5 },
-          _count: { select: { conversations: true } },
-        },
+      const contact = await db.query.contacts.findFirst({
+        where: and(eq(contacts.id, id), eq(contacts.orgId, orgId)),
+        with: {
+          appointments: {
+            orderBy: [desc(appointments.appointmentDate)],
+            limit: 5
+          }
+        }
       });
 
       if (!contact) return reply.status(404).send({ error: 'Contact not found' });
-      return contact;
+      
+      // Compute conversation count manually since Drizzle doesn't have _count select like Prisma
+      const convCount = await db.select({ value: sql`count(*)` }).from(conversations).where(eq(conversations.contactId, id));
+      
+      return { ...contact, _count: { conversations: convCount[0].value } };
     } catch (err) {
       logger.error('[public-api] GET /contacts/:id error:', err);
       return reply.status(500).send({ error: 'Failed to fetch contact' });
@@ -91,19 +104,20 @@ export async function publicApiRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(400).send({ error: 'fullName or phone is required' });
       }
 
-      const contact = await prisma.contact.create({
-        data: {
-          orgId,
-          fullName: body.fullName,
-          phone: body.phone,
-          email: body.email,
-          source: body.source,
-          status: body.status ?? 'new',
-          notes: body.notes,
-          tags: body.tags ?? [],
-        },
+      const id = uuidv4();
+      await db.insert(contacts).values({
+        id,
+        orgId,
+        fullName: body.fullName,
+        phone: body.phone,
+        email: body.email,
+        source: body.source,
+        status: body.status ?? 'new',
+        notes: body.notes,
+        tags: body.tags ?? [],
       });
 
+      const contact = await db.query.contacts.findFirst({ where: eq(contacts.id, id) });
       return reply.status(201).send(contact);
     } catch (err) {
       logger.error('[public-api] POST /contacts error:', err);
@@ -117,12 +131,14 @@ export async function publicApiRoutes(app: FastifyInstance): Promise<void> {
       const { id } = request.params as { id: string };
       const body = request.body as Record<string, any>;
 
-      const existing = await prisma.contact.findFirst({ where: { id, orgId }, select: { id: true } });
+      const existing = await db.query.contacts.findFirst({ 
+        where: and(eq(contacts.id, id), eq(contacts.orgId, orgId)), 
+        columns: { id: true } 
+      });
       if (!existing) return reply.status(404).send({ error: 'Contact not found' });
 
-      const updated = await prisma.contact.update({
-        where: { id },
-        data: {
+      await db.update(contacts)
+        .set({
           fullName: body.fullName,
           phone: body.phone,
           email: body.email,
@@ -130,9 +146,11 @@ export async function publicApiRoutes(app: FastifyInstance): Promise<void> {
           status: body.status,
           notes: body.notes,
           tags: body.tags,
-        },
-      });
+          updatedAt: new Date()
+        })
+        .where(eq(contacts.id, id));
 
+      const updated = await db.query.contacts.findFirst({ where: eq(contacts.id, id) });
       return updated;
     } catch (err) {
       logger.error('[public-api] PUT /contacts/:id error:', err);
@@ -147,18 +165,20 @@ export async function publicApiRoutes(app: FastifyInstance): Promise<void> {
       const orgId = (request as any).orgId as string;
       const { limit = '20' } = request.query as Record<string, string>;
 
-      const conversations = await prisma.conversation.findMany({
-        where: { orgId },
-        select: {
+      const list = await db.query.conversations.findMany({
+        where: eq(conversations.orgId, orgId),
+        columns: {
           id: true, threadType: true, externalThreadId: true,
           lastMessageAt: true, unreadCount: true, isReplied: true,
-          contact: { select: { id: true, fullName: true, phone: true, avatarUrl: true } },
         },
-        orderBy: { lastMessageAt: 'desc' },
-        take: Math.min(parseInt(limit) || 20, 100),
+        with: {
+          contact: { columns: { id: true, fullName: true, phone: true, avatarUrl: true } }
+        },
+        orderBy: [desc(conversations.lastMessageAt)],
+        limit: Math.min(parseInt(limit) || 20, 100),
       });
 
-      return { conversations };
+      return { conversations: list };
     } catch (err) {
       logger.error('[public-api] GET /conversations error:', err);
       return reply.status(500).send({ error: 'Failed to fetch conversations' });
@@ -171,20 +191,23 @@ export async function publicApiRoutes(app: FastifyInstance): Promise<void> {
       const { id } = request.params as { id: string };
       const { limit = '50' } = request.query as Record<string, string>;
 
-      const conv = await prisma.conversation.findFirst({ where: { id, orgId }, select: { id: true } });
+      const conv = await db.query.conversations.findFirst({ 
+        where: and(eq(conversations.id, id), eq(conversations.orgId, orgId)), 
+        columns: { id: true } 
+      });
       if (!conv) return reply.status(404).send({ error: 'Conversation not found' });
 
-      const messages = await prisma.message.findMany({
-        where: { conversationId: id, isDeleted: false },
-        orderBy: { sentAt: 'desc' },
-        take: Math.min(parseInt(limit) || 50, 200),
-        select: {
+      const list = await db.query.messages.findMany({
+        where: and(eq(messages.conversationId, id), eq(messages.isDeleted, false)),
+        orderBy: [desc(messages.sentAt)],
+        limit: Math.min(parseInt(limit) || 50, 200),
+        columns: {
           id: true, senderType: true, senderName: true,
           content: true, contentType: true, sentAt: true, attachments: true,
         },
       });
 
-      return { messages };
+      return { messages: list };
     } catch (err) {
       logger.error('[public-api] GET /conversations/:id/messages error:', err);
       return reply.status(500).send({ error: 'Failed to fetch messages' });
@@ -198,21 +221,20 @@ export async function publicApiRoutes(app: FastifyInstance): Promise<void> {
       const orgId = (request as any).orgId as string;
       const { from, to } = request.query as Record<string, string>;
 
-      const where: any = { orgId };
-      if (from || to) {
-        where.appointmentDate = {};
-        if (from) where.appointmentDate.gte = new Date(from);
-        if (to) where.appointmentDate.lte = new Date(to);
-      }
+      let filters = eq(appointments.orgId, orgId);
+      if (from) filters = and(filters, gte(appointments.appointmentDate, new Date(from))) as any;
+      if (to) filters = and(filters, lte(appointments.appointmentDate, new Date(to))) as any;
 
-      const appointments = await prisma.appointment.findMany({
-        where,
-        include: { contact: { select: { id: true, fullName: true, phone: true } } },
-        orderBy: { appointmentDate: 'asc' },
-        take: 100,
+      const list = await db.query.appointments.findMany({
+        where: filters,
+        with: {
+          contact: { columns: { id: true, fullName: true, phone: true } }
+        },
+        orderBy: [desc(appointments.appointmentDate)],
+        limit: 100,
       });
 
-      return { appointments };
+      return { appointments: list };
     } catch (err) {
       logger.error('[public-api] GET /appointments error:', err);
       return reply.status(500).send({ error: 'Failed to fetch appointments' });
@@ -228,20 +250,24 @@ export async function publicApiRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(400).send({ error: 'contactId and appointmentDate are required' });
       }
 
-      const contact = await prisma.contact.findFirst({ where: { id: body.contactId, orgId }, select: { id: true } });
+      const contact = await db.query.contacts.findFirst({ 
+        where: and(eq(contacts.id, body.contactId), eq(contacts.orgId, orgId)), 
+        columns: { id: true } 
+      });
       if (!contact) return reply.status(404).send({ error: 'Contact not found' });
 
-      const appointment = await prisma.appointment.create({
-        data: {
-          orgId,
-          contactId: body.contactId,
-          appointmentDate: new Date(body.appointmentDate),
-          appointmentTime: body.appointmentTime,
-          type: body.type,
-          notes: body.notes,
-        },
+      const id = uuidv4();
+      await db.insert(appointments).values({
+        id,
+        orgId,
+        contactId: body.contactId,
+        appointmentDate: new Date(body.appointmentDate),
+        appointmentTime: body.appointmentTime,
+        type: body.type,
+        notes: body.notes,
       });
 
+      const appointment = await db.query.appointments.findFirst({ where: eq(appointments.id, id) });
       return reply.status(201).send(appointment);
     } catch (err) {
       logger.error('[public-api] POST /appointments error:', err);
@@ -261,9 +287,9 @@ export async function publicApiRoutes(app: FastifyInstance): Promise<void> {
       }
 
       // Verify account belongs to org
-      const account = await prisma.zaloAccount.findFirst({
-        where: { id: body.zaloAccountId, orgId },
-        select: { id: true, status: true },
+      const account = await db.query.zaloAccounts.findFirst({
+        where: and(eq(zaloAccounts.id, body.zaloAccountId), eq(zaloAccounts.orgId, orgId)),
+        columns: { id: true, status: true },
       });
       if (!account) return reply.status(404).send({ error: 'Zalo account not found' });
       if (account.status !== 'connected') {

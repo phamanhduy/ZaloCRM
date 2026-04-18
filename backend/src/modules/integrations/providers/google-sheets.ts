@@ -3,7 +3,9 @@
  * Config shape: { spreadsheetId: string, apiKey: string, sheetName?: string }
  * Uses simple API key auth for public/shared sheets.
  */
-import { prisma } from '../../../shared/database/prisma-client.js';
+import { db } from '../../../shared/database/db.js';
+import { contacts } from '../../../shared/database/schema.js';
+import { eq, desc } from 'drizzle-orm';
 import { logger } from '../../../shared/utils/logger.js';
 
 interface SheetConfig {
@@ -23,19 +25,19 @@ export async function syncGoogleSheets(
   }
 
   // Fetch org contacts
-  const contacts = await prisma.contact.findMany({
-    where: { orgId },
-    orderBy: { createdAt: 'desc' },
-    take: 5000,
+  const list = await db.query.contacts.findMany({
+    where: eq(contacts.orgId, orgId),
+    orderBy: [desc(contacts.createdAt)],
+    limit: 5000,
   });
 
-  if (contacts.length === 0) {
+  if (list.length === 0) {
     return { direction: 'export', recordCount: 0, status: 'success' };
   }
 
   // Build rows: header + data
   const header = ['ID', 'Họ tên', 'SĐT', 'Email', 'Nguồn', 'Trạng thái', 'Ghi chú', 'Ngày tạo'];
-  const rows = contacts.map((c: any) => [
+  const rows = list.map((c) => [
     c.id,
     c.fullName ?? '',
     c.phone ?? '',
@@ -43,7 +45,7 @@ export async function syncGoogleSheets(
     c.source ?? '',
     c.status ?? '',
     c.notes ?? '',
-    c.createdAt.toISOString(),
+    c.createdAt?.toISOString() ?? '',
   ]);
 
   const values = [header, ...rows];
@@ -65,8 +67,8 @@ export async function syncGoogleSheets(
       return { direction: 'export', recordCount: 0, status: 'failed', errorMessage: `Sheets API ${response.status}: ${text.slice(0, 200)}` };
     }
 
-    logger.info(`[google-sheets] Exported ${contacts.length} contacts to spreadsheet ${spreadsheetId}`);
-    return { direction: 'export', recordCount: contacts.length, status: 'success' };
+    logger.info(`[google-sheets] Exported ${list.length} contacts to spreadsheet ${spreadsheetId}`);
+    return { direction: 'export', recordCount: list.length, status: 'success' };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { direction: 'export', recordCount: 0, status: 'failed', errorMessage: msg };

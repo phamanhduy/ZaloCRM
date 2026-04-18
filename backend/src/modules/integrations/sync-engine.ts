@@ -2,12 +2,15 @@
  * sync-engine.ts — Orchestrates sync execution for any integration type.
  * Delegates to provider-specific handlers and logs results.
  */
-import { prisma } from '../../shared/database/prisma-client.js';
+import { db } from '../../shared/database/db.js';
+import { integrations, syncLogs } from '../../shared/database/schema.js';
+import { eq } from 'drizzle-orm';
 import { logger } from '../../shared/utils/logger.js';
 import { syncGoogleSheets } from './providers/google-sheets.js';
 import { sendTelegramNotification } from './providers/telegram-bot.js';
 import { importFacebookLeads } from './providers/facebook.js';
 import { triggerZapierWebhook } from './providers/zapier-webhook.js';
+import { v4 as uuidv4 } from 'uuid';
 
 interface Integration {
   id: string;
@@ -52,28 +55,26 @@ export async function runSync(integration: Integration) {
   }
 
   // Persist sync log
-  let log;
   try {
-    log = await prisma.syncLog.create({
-      data: {
-        integrationId: integration.id,
-        direction: result.direction,
-        recordCount: result.recordCount,
-        status: result.status,
-        errorMessage: result.errorMessage ?? null,
-      },
+    const logId = uuidv4();
+    await db.insert(syncLogs).values({
+      id: logId,
+      integrationId: integration.id,
+      direction: result.direction,
+      recordCount: result.recordCount,
+      status: result.status,
+      errorMessage: result.errorMessage ?? null,
     });
 
     // Update lastSyncAt
-    await prisma.integration.update({
-      where: { id: integration.id },
-      data: { lastSyncAt: new Date() },
-    });
+    await db.update(integrations)
+      .set({ lastSyncAt: new Date(), updatedAt: new Date() })
+      .where(eq(integrations.id, integration.id));
+
+    return await db.query.syncLogs.findFirst({ where: eq(syncLogs.id, logId) });
   } catch (dbErr) {
     logger.error(`[sync-engine] Failed to persist sync log:`, dbErr);
     // Return result info even if log persistence failed
     return { ...result, integrationId: integration.id };
   }
-
-  return log;
 }

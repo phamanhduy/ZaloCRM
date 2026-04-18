@@ -4,7 +4,9 @@
  * Owner/admin roles bypass the check (they have access to all accounts in their org).
  */
 import type { FastifyRequest, FastifyReply } from 'fastify';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { db } from '../../shared/database/db.js';
+import { conversations, zaloAccountAccess } from '../../shared/database/schema.js';
+import { eq, and } from 'drizzle-orm';
 
 type Permission = 'read' | 'chat' | 'admin';
 
@@ -24,9 +26,9 @@ export function requireZaloAccess(minPermission: Permission) {
     // If accessing via conversation, look up the Zalo account from the conversation
     if (params.id && !params.zaloAccountId) {
       try {
-        const conv = await prisma.conversation.findFirst({
-          where: { id: params.id, orgId: user.orgId },
-          select: { zaloAccountId: true },
+        const conv = await db.query.conversations.findFirst({
+          where: and(eq(conversations.id, params.id), eq(conversations.orgId, user.orgId)),
+          columns: { zaloAccountId: true },
         });
         if (conv) zaloAccountId = conv.zaloAccountId;
       } catch {
@@ -37,8 +39,11 @@ export function requireZaloAccess(minPermission: Permission) {
     if (!zaloAccountId) return reply.status(404).send({ error: 'Not found' });
 
     try {
-      const access = await prisma.zaloAccountAccess.findFirst({
-        where: { zaloAccountId, userId: user.id },
+      const access = await db.query.zaloAccountAccess.findFirst({
+        where: and(
+          eq(zaloAccountAccess.zaloAccountId, zaloAccountId), 
+          eq(zaloAccountAccess.userId, user.id)
+        ),
       });
 
       if (!access) {

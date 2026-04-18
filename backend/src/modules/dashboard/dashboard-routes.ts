@@ -3,7 +3,9 @@
  * All routes require JWT auth, scoped to user's orgId.
  */
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { db } from '../../shared/database/db.js';
+import { messages, conversations, appointments, contacts } from '../../shared/database/schema.js';
+import { eq, and, gte, lt, lte, gt, count, sql, asc, desc } from 'drizzle-orm';
 import { authMiddleware } from '../auth/auth-middleware.js';
 import { logger } from '../../shared/utils/logger.js';
 
@@ -40,27 +42,41 @@ export async function dashboardRoutes(app: FastifyInstance): Promise<void> {
       const { today, tomorrow } = todayRange();
       const weekAgo = weekAgoDate(today);
 
-      const [messagesToday, unreplied, unread, aptsToday, newContacts, totalContacts] =
+      const [msgTodayRes, unrepliedRes, unreadRes, aptsTodayRes, newContactsRes, totalContactsRes] =
         await Promise.all([
-          prisma.message.count({
-            where: { conversation: { orgId }, sentAt: { gte: today, lt: tomorrow } },
-          }),
-          prisma.conversation.count({ where: { orgId, isReplied: false, unreadCount: { gt: 0 } } }),
-          prisma.conversation.count({ where: { orgId, unreadCount: { gt: 0 } } }),
-          prisma.appointment.count({
-            where: { orgId, appointmentDate: { gte: today, lt: tomorrow }, status: 'scheduled' },
-          }),
-          prisma.contact.count({ where: { orgId, createdAt: { gte: weekAgo } } }),
-          prisma.contact.count({ where: { orgId } }),
+          db.select({ value: count() })
+            .from(messages)
+            .innerJoin(conversations, eq(messages.conversationId, conversations.id))
+            .where(and(eq(conversations.orgId, orgId), gte(messages.sentAt, today), lt(messages.sentAt, tomorrow))),
+          
+          db.select({ value: count() })
+            .from(conversations)
+            .where(and(eq(conversations.orgId, orgId), eq(conversations.isReplied, false), gt(conversations.unreadCount, 0))),
+            
+          db.select({ value: count() })
+            .from(conversations)
+            .where(and(eq(conversations.orgId, orgId), gt(conversations.unreadCount, 0))),
+            
+          db.select({ value: count() })
+            .from(appointments)
+            .where(and(eq(appointments.orgId, orgId), gte(appointments.appointmentDate, today), lt(appointments.appointmentDate, tomorrow), eq(appointments.status, 'scheduled'))),
+            
+          db.select({ value: count() })
+            .from(contacts)
+            .where(and(eq(contacts.orgId, orgId), gte(contacts.createdAt, weekAgo))),
+            
+          db.select({ value: count() })
+            .from(contacts)
+            .where(eq(contacts.orgId, orgId)),
         ]);
 
       return {
-        messagesToday,
-        messagesUnreplied: unreplied,
-        messagesUnread: unread,
-        appointmentsToday: aptsToday,
-        newContactsThisWeek: newContacts,
-        totalContacts,
+        messagesToday: msgTodayRes[0].value,
+        messagesUnreplied: unrepliedRes[0].value,
+        messagesUnread: unreadRes[0].value,
+        appointmentsToday: aptsTodayRes[0].value,
+        newContactsThisWeek: newContactsRes[0].value,
+        totalContacts: totalContactsRes[0].value,
       };
     } catch (err) {
       logger.error('[dashboard] KPI error:', err);
@@ -73,28 +89,32 @@ export async function dashboardRoutes(app: FastifyInstance): Promise<void> {
     try {
       const { orgId } = request.user!;
       const query = request.query as QueryParams;
-      const from =
-        query.from || new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
+      const from = query.from || new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
       const to = query.to || new Date().toISOString().split('T')[0];
 
-      const rows = await prisma.$queryRaw<
-        Array<{ date: Date; sent: bigint; received: bigint }>
-      >`
-        SELECT
-          DATE(m.sent_at) AS date,
-          COUNT(*) FILTER (WHERE m.sender_type = 'self') AS sent,
-          COUNT(*) FILTER (WHERE m.sender_type = 'contact') AS received
-        FROM messages m
-        JOIN conversations c ON c.id = m.conversation_id
-        WHERE c.org_id = ${orgId}
-          AND m.sent_at >= ${from}::date
-          AND m.sent_at < (${to}::date + interval '1 day')
-        GROUP BY DATE(m.sent_at)
-        ORDER BY date ASC
-      `;
+      // Convert from/to strings to Date objects for filtering
+      const fromDate = new Date(from);
+      const toDate = new Date(to);
+      toDate.setHours(23, 59, 59, 999);
 
-      const data = rows.map((r) => ({
-        date: r.date instanceof Date ? r.date.toISOString().split('T')[0] : String(r.date),
+      // In SQLite with Drizzle, we use strftime on the timestamp_ms column
+      const rows = await db.select({
+        date: sql`strftime('%Y-%m-%d', datetime(${messages.sentAt} / 1000, 'unixepoch'))`.as('date'),
+        sent: sql`SUM(CASE WHEN ${messages.senderType} = 'self' THEN 1 ELSE 0 END)`.as('sent'),
+        received: sql`SUM(CASE WHEN ${messages.senderType} = 'contact' THEN 1 ELSE 0 END)`.as('received')
+      })
+      .from(messages)
+      .innerJoin(conversations, eq(messages.conversationId, conversations.id))
+      .where(and(
+        eq(conversations.orgId, orgId),
+        gte(messages.sentAt, fromDate),
+        lte(messages.sentAt, toDate)
+      ))
+      .groupBy(sql`date`)
+      .orderBy(asc(sql`date`));
+
+      const data = rows.map((r: any) => ({
+        date: r.date,
         sent: Number(r.sent),
         received: Number(r.received),
       }));
@@ -110,12 +130,15 @@ export async function dashboardRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/v1/dashboard/pipeline', async (request: FastifyRequest, reply: FastifyReply) => {
     try {
       const { orgId } = request.user!;
-      const pipeline = await prisma.contact.groupBy({
-        by: ['status'],
-        where: { orgId, status: { not: null } },
-        _count: true,
-      });
-      return { data: pipeline.map((p) => ({ status: p.status, count: p._count })) };
+      const pipeline = await db.select({
+        status: contacts.status,
+        count: count()
+      })
+      .from(contacts)
+      .where(and(eq(contacts.orgId, orgId), sql`${contacts.status} IS NOT NULL`))
+      .groupBy(contacts.status);
+      
+      return { data: pipeline.map((p) => ({ status: p.status, count: p.count })) };
     } catch (err) {
       logger.error('[dashboard] Pipeline error:', err);
       return reply.status(500).send({ error: 'Failed to fetch pipeline data' });
@@ -126,12 +149,15 @@ export async function dashboardRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/v1/dashboard/sources', async (request: FastifyRequest, reply: FastifyReply) => {
     try {
       const { orgId } = request.user!;
-      const sources = await prisma.contact.groupBy({
-        by: ['source'],
-        where: { orgId, source: { not: null } },
-        _count: true,
-      });
-      return { data: sources.map((s) => ({ source: s.source, count: s._count })) };
+      const sourcesRes = await db.select({
+        source: contacts.source,
+        count: count()
+      })
+      .from(contacts)
+      .where(and(eq(contacts.orgId, orgId), sql`${contacts.source} IS NOT NULL`))
+      .groupBy(contacts.source);
+      
+      return { data: sourcesRes.map((s) => ({ source: s.source, count: s.count })) };
     } catch (err) {
       logger.error('[dashboard] Sources error:', err);
       return reply.status(500).send({ error: 'Failed to fetch source data' });
@@ -143,20 +169,20 @@ export async function dashboardRoutes(app: FastifyInstance): Promise<void> {
     try {
       const { orgId } = request.user!;
       const query = request.query as QueryParams;
-      const where: Record<string, any> = { orgId };
-      if (query.from || query.to) {
-        where.appointmentDate = {};
-        if (query.from) where.appointmentDate.gte = new Date(query.from);
-        if (query.to) where.appointmentDate.lte = new Date(query.to);
-      }
+      
+      let filters = eq(appointments.orgId, orgId);
+      if (query.from) filters = and(filters, gte(appointments.appointmentDate, new Date(query.from))) as any;
+      if (query.to) filters = and(filters, lte(appointments.appointmentDate, new Date(query.to))) as any;
 
-      const stats = await prisma.appointment.groupBy({
-        by: ['status'],
-        where,
-        _count: true,
-      });
+      const stats = await db.select({
+        status: appointments.status,
+        count: count()
+      })
+      .from(appointments)
+      .where(filters)
+      .groupBy(appointments.status);
 
-      return { data: stats.map((s) => ({ status: s.status, count: s._count })) };
+      return { data: stats.map((s) => ({ status: s.status, count: s.count })) };
     } catch (err) {
       logger.error('[dashboard] Appointments error:', err);
       return reply.status(500).send({ error: 'Failed to fetch appointment stats' });

@@ -3,7 +3,10 @@
  * Uses bcryptjs for password hashing and Fastify JWT for token signing.
  */
 import bcrypt from 'bcryptjs';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { db } from '../../shared/database/db.js';
+import { users, organizations } from '../../shared/database/schema.js';
+import { count, eq } from 'drizzle-orm';
+import { v4 as uuidv4 } from 'uuid';
 import { logger } from '../../shared/utils/logger.js';
 
 export interface JwtPayload {
@@ -15,8 +18,8 @@ export interface JwtPayload {
 
 // Check if any users exist — true means first-run setup is needed
 export async function checkSetupStatus(): Promise<{ needsSetup: boolean }> {
-  const count = await prisma.user.count();
-  return { needsSetup: count === 0 };
+  const [result] = await db.select({ value: count() }).from(users);
+  return { needsSetup: result.value === 0 };
 }
 
 // Create the initial organization + owner user, return JWT payload
@@ -26,8 +29,8 @@ export async function setup(
   email: string,
   password: string,
 ): Promise<JwtPayload> {
-  const existing = await prisma.user.count();
-  if (existing > 0) {
+  const [existingCount] = await db.select({ value: count() }).from(users);
+  if (existingCount.value > 0) {
     const err = new Error('Setup already completed') as Error & { statusCode: number };
     err.statusCode = 400;
     throw err;
@@ -35,34 +38,42 @@ export async function setup(
 
   const passwordHash = await bcrypt.hash(password, 12);
 
-  const result = await prisma.$transaction(async (tx) => {
-    const org = await tx.organization.create({ data: { name: orgName } });
-    const user = await tx.user.create({
-      data: {
-        orgId: org.id,
-        email: email.toLowerCase().trim(),
-        passwordHash,
-        fullName,
-        role: 'owner',
-      },
-    });
-    return { org, user };
+  // Use synchronous transaction for better-sqlite3
+  const result = db.transaction((tx) => {
+    const orgId = uuidv4();
+    const userId = uuidv4();
+
+    tx.insert(organizations).values({
+      id: orgId,
+      name: orgName
+    }).run();
+
+    tx.insert(users).values({
+      id: userId,
+      orgId: orgId,
+      email: email.toLowerCase().trim(),
+      passwordHash,
+      fullName,
+      role: 'owner',
+    }).run();
+
+    return { orgId, userId, email: email.toLowerCase().trim() };
   });
 
-  logger.info(`Setup complete — org=${result.org.id}, user=${result.user.id}`);
+  logger.info(`Setup complete — org=${result.orgId}, user=${result.userId}`);
 
   return {
-    id: result.user.id,
-    email: result.user.email,
-    role: result.user.role,
-    orgId: result.org.id,
+    id: result.userId,
+    email: result.email,
+    role: 'owner',
+    orgId: result.orgId,
   };
 }
 
 // Verify credentials, return JWT payload
 export async function login(email: string, password: string): Promise<JwtPayload> {
-  const user = await prisma.user.findUnique({
-    where: { email: email.toLowerCase().trim() },
+  const user = await db.query.users.findFirst({
+    where: eq(users.email, email.toLowerCase().trim()),
   });
 
   if (!user || !user.isActive) {
@@ -83,19 +94,11 @@ export async function login(email: string, password: string): Promise<JwtPayload
 
 // Return safe user profile (no password hash)
 export async function getProfile(userId: string) {
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: {
-      id: true,
-      email: true,
-      fullName: true,
-      role: true,
-      orgId: true,
-      teamId: true,
-      isActive: true,
-      createdAt: true,
-      org: { select: { id: true, name: true } },
-    },
+  const user = await db.query.users.findFirst({
+    where: eq(users.id, userId),
+    with: {
+      org: true
+    }
   });
 
   if (!user) {
@@ -104,5 +107,7 @@ export async function getProfile(userId: string) {
     throw err;
   }
 
-  return user;
+  // Remove sensitive fields
+  const { passwordHash, ...safeUser } = user;
+  return safeUser;
 }

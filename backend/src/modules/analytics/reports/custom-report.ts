@@ -2,7 +2,8 @@
  * custom-report.ts — Execute user-defined report from predefined metrics.
  * Supports 6 metrics, 5 groupBy options, optional filters.
  */
-import { prisma } from '../../../shared/database/prisma-client.js';
+import { db } from '../../../shared/database/db.js';
+import { sql } from 'drizzle-orm';
 
 export interface ReportConfig {
   metrics: string[]; // messages_sent | messages_received | contacts_new | contacts_converted | appointments | avg_response_time
@@ -21,15 +22,15 @@ export async function executeCustomReport(
   config: ReportConfig,
 ): Promise<CustomReportResult> {
   const { from, to } = config.dateRange;
-  const gte = new Date(from);
-  const lt = new Date(to);
-  lt.setDate(lt.getDate() + 1);
+  const startDate = new Date(from);
+  const endDate = new Date(to);
+  endDate.setDate(endDate.getDate() + 1);
 
   const datasets: { metric: string; data: number[] }[] = [];
   let labels: string[] = [];
 
   for (const metric of config.metrics) {
-    const result = await queryMetric(orgId, metric, config.groupBy, gte, lt, config.filters);
+    const result = await queryMetric(orgId, metric, config.groupBy, startDate, endDate, config.filters);
     if (!labels.length) labels = result.labels;
     datasets.push({ metric, data: result.data });
   }
@@ -72,46 +73,51 @@ async function queryMessageMetric(
 ): Promise<{ labels: string[]; data: number[] }> {
   const senderType = metric === 'messages_sent' ? 'self' : 'contact';
   const dateExpr = groupByDateExpr(groupBy, 'm.sent_at');
-  const userFilter = filters?.userId ? `AND m.replied_by_user_id = '${filters.userId}'` : '';
-
+  
   if (groupBy === 'user') {
-    const rows = await prisma.$queryRawUnsafe<Array<{ label: string; cnt: bigint }>>(
-      `SELECT u.full_name AS label, COUNT(*)::bigint AS cnt
-       FROM messages m
-       JOIN conversations c ON c.id = m.conversation_id
-       LEFT JOIN users u ON u.id = m.replied_by_user_id
-       WHERE c.org_id = $1 AND m.sender_type = $2
-         AND m.sent_at >= $3 AND m.sent_at < $4
-       GROUP BY u.full_name ORDER BY cnt DESC`,
-      orgId, senderType, gte, lt,
-    );
-    return { labels: rows.map((r) => r.label ?? 'N/A'), data: rows.map((r) => Number(r.cnt)) };
+    const rows = db.all(sql`
+      SELECT u.full_name AS label, COUNT(*) AS cnt
+      FROM messages m
+      JOIN conversations c ON c.id = m.conversation_id
+      LEFT JOIN users u ON u.id = m.replied_by_user_id
+      WHERE c.org_id = ${orgId} AND m.sender_type = ${senderType}
+        AND m.sent_at >= ${gte.getTime()} AND m.sent_at < ${lt.getTime()}
+      GROUP BY u.full_name ORDER BY cnt DESC
+    `);
+    return { 
+      labels: rows.map((r: any) => r.label ?? 'N/A'), 
+      data: rows.map((r: any) => Number(r.cnt)) 
+    };
   }
 
   if (groupBy === 'source') {
-    const rows = await prisma.$queryRawUnsafe<Array<{ label: string; cnt: bigint }>>(
-      `SELECT COALESCE(ct.source, 'N/A') AS label, COUNT(*)::bigint AS cnt
-       FROM messages m
-       JOIN conversations c ON c.id = m.conversation_id
-       LEFT JOIN contacts ct ON ct.id = c.contact_id
-       WHERE c.org_id = $1 AND m.sender_type = $2
-         AND m.sent_at >= $3 AND m.sent_at < $4
-       GROUP BY ct.source ORDER BY cnt DESC`,
-      orgId, senderType, gte, lt,
-    );
-    return { labels: rows.map((r) => r.label), data: rows.map((r) => Number(r.cnt)) };
+    const rows = db.all(sql`
+      SELECT COALESCE(ct.source, 'N/A') AS label, COUNT(*) AS cnt
+      FROM messages m
+      JOIN conversations c ON c.id = m.conversation_id
+      LEFT JOIN contacts ct ON ct.id = c.contact_id
+      WHERE c.org_id = ${orgId} AND m.sender_type = ${senderType}
+        AND m.sent_at >= ${gte.getTime()} AND m.sent_at < ${lt.getTime()}
+      GROUP BY ct.source ORDER BY cnt DESC
+    `);
+    return { 
+      labels: rows.map((r: any) => String(r.label)), 
+      data: rows.map((r: any) => Number(r.cnt)) 
+    };
   }
 
-  const rows = await prisma.$queryRawUnsafe<Array<{ label: string; cnt: bigint }>>(
-    `SELECT ${dateExpr} AS label, COUNT(*)::bigint AS cnt
-     FROM messages m
-     JOIN conversations c ON c.id = m.conversation_id
-     WHERE c.org_id = $1 AND m.sender_type = $2
-       AND m.sent_at >= $3 AND m.sent_at < $4
-     GROUP BY label ORDER BY label ASC`,
-    orgId, senderType, gte, lt,
-  );
-  return { labels: rows.map((r) => String(r.label)), data: rows.map((r) => Number(r.cnt)) };
+  const rows = db.all(sql`
+    SELECT ${sql.raw(dateExpr)} AS label, COUNT(*) AS cnt
+    FROM messages m
+    JOIN conversations c ON c.id = m.conversation_id
+    WHERE c.org_id = ${orgId} AND m.sender_type = ${senderType}
+      AND m.sent_at >= ${gte.getTime()} AND m.sent_at < ${lt.getTime()}
+    GROUP BY label ORDER BY label ASC
+  `);
+  return { 
+    labels: rows.map((r: any) => String(r.label)), 
+    data: rows.map((r: any) => Number(r.cnt)) 
+  };
 }
 
 async function queryContactMetric(
@@ -123,41 +129,38 @@ async function queryContactMetric(
   filters?: ReportConfig['filters'],
 ): Promise<{ labels: string[]; data: number[] }> {
   const dateCol = type === 'new' ? 'created_at' : 'updated_at';
-  const statusFilter = type === 'converted' ? `AND status = 'converted'` : '';
-  const sourceFilter = filters?.source ? `AND source = '${filters.source}'` : '';
+  const statusCond = type === 'converted' ? sql`AND status = 'converted'` : sql``;
+  const sourceCond = filters?.source ? sql`AND source = ${filters.source}` : sql``;
 
   if (groupBy === 'user') {
-    const rows = await prisma.$queryRawUnsafe<Array<{ label: string; cnt: bigint }>>(
-      `SELECT COALESCE(u.full_name, 'Chưa gán') AS label, COUNT(*)::bigint AS cnt
-       FROM contacts c LEFT JOIN users u ON u.id = c.assigned_user_id
-       WHERE c.org_id = $1 AND c.${dateCol} >= $2 AND c.${dateCol} < $3
-         ${statusFilter} ${sourceFilter}
-       GROUP BY u.full_name ORDER BY cnt DESC`,
-      orgId, gte, lt,
-    );
-    return { labels: rows.map((r) => r.label), data: rows.map((r) => Number(r.cnt)) };
+    const rows = db.all(sql`
+      SELECT COALESCE(u.full_name, 'Chưa gán') AS label, COUNT(*) AS cnt
+      FROM contacts c LEFT JOIN users u ON u.id = c.assigned_user_id
+      WHERE c.org_id = ${orgId} AND c.${sql.raw(dateCol)} >= ${gte.getTime()} AND c.${sql.raw(dateCol)} < ${lt.getTime()}
+        ${statusCond} ${sourceCond}
+      GROUP BY u.full_name ORDER BY cnt DESC
+    `);
+    return { labels: rows.map((r: any) => String(r.label)), data: rows.map((r: any) => Number(r.cnt)) };
   }
 
   if (groupBy === 'source') {
-    const rows = await prisma.$queryRawUnsafe<Array<{ label: string; cnt: bigint }>>(
-      `SELECT COALESCE(source, 'N/A') AS label, COUNT(*)::bigint AS cnt
-       FROM contacts WHERE org_id = $1 AND ${dateCol} >= $2 AND ${dateCol} < $3
-         ${statusFilter}
-       GROUP BY source ORDER BY cnt DESC`,
-      orgId, gte, lt,
-    );
-    return { labels: rows.map((r) => r.label), data: rows.map((r) => Number(r.cnt)) };
+    const rows = db.all(sql`
+      SELECT COALESCE(source, 'N/A') AS label, COUNT(*) AS cnt
+      FROM contacts WHERE org_id = ${orgId} AND ${sql.raw(dateCol)} >= ${gte.getTime()} AND ${sql.raw(dateCol)} < ${lt.getTime()}
+        ${statusCond}
+      GROUP BY source ORDER BY cnt DESC
+    `);
+    return { labels: rows.map((r: any) => String(r.label)), data: rows.map((r: any) => Number(r.cnt)) };
   }
 
   const dateExpr = groupByDateExpr(groupBy, dateCol);
-  const rows = await prisma.$queryRawUnsafe<Array<{ label: string; cnt: bigint }>>(
-    `SELECT ${dateExpr} AS label, COUNT(*)::bigint AS cnt
-     FROM contacts WHERE org_id = $1 AND ${dateCol} >= $2 AND ${dateCol} < $3
-       ${statusFilter} ${sourceFilter}
-     GROUP BY label ORDER BY label ASC`,
-    orgId, gte, lt,
-  );
-  return { labels: rows.map((r) => String(r.label)), data: rows.map((r) => Number(r.cnt)) };
+  const rows = db.all(sql`
+    SELECT ${sql.raw(dateExpr)} AS label, COUNT(*) AS cnt
+    FROM contacts WHERE org_id = ${orgId} AND ${sql.raw(dateCol)} >= ${gte.getTime()} AND ${sql.raw(dateCol)} < ${lt.getTime()}
+      ${statusCond} ${sourceCond}
+    GROUP BY label ORDER BY label ASC
+  `);
+  return { labels: rows.map((r: any) => String(r.label)), data: rows.map((r: any) => Number(r.cnt)) };
 }
 
 async function queryAppointmentMetric(
@@ -167,24 +170,22 @@ async function queryAppointmentMetric(
   lt: Date,
 ): Promise<{ labels: string[]; data: number[] }> {
   if (groupBy === 'user') {
-    const rows = await prisma.$queryRawUnsafe<Array<{ label: string; cnt: bigint }>>(
-      `SELECT COALESCE(u.full_name, 'Chưa gán') AS label, COUNT(*)::bigint AS cnt
-       FROM appointments a LEFT JOIN users u ON u.id = a.assigned_user_id
-       WHERE a.org_id = $1 AND a.appointment_date >= $2 AND a.appointment_date < $3
-       GROUP BY u.full_name ORDER BY cnt DESC`,
-      orgId, gte, lt,
-    );
-    return { labels: rows.map((r) => r.label), data: rows.map((r) => Number(r.cnt)) };
+    const rows = db.all(sql`
+      SELECT COALESCE(u.full_name, 'Chưa gán') AS label, COUNT(*) AS cnt
+      FROM appointments a LEFT JOIN users u ON u.id = a.assigned_user_id
+      WHERE a.org_id = ${orgId} AND a.appointment_date >= ${gte.getTime()} AND a.appointment_date < ${lt.getTime()}
+      GROUP BY u.full_name ORDER BY cnt DESC
+    `);
+    return { labels: rows.map((r: any) => String(r.label)), data: rows.map((r: any) => Number(r.cnt)) };
   }
 
   const dateExpr = groupByDateExpr(groupBy, 'appointment_date');
-  const rows = await prisma.$queryRawUnsafe<Array<{ label: string; cnt: bigint }>>(
-    `SELECT ${dateExpr} AS label, COUNT(*)::bigint AS cnt
-     FROM appointments WHERE org_id = $1 AND appointment_date >= $2 AND appointment_date < $3
-     GROUP BY label ORDER BY label ASC`,
-    orgId, gte, lt,
-  );
-  return { labels: rows.map((r) => String(r.label)), data: rows.map((r) => Number(r.cnt)) };
+  const rows = db.all(sql`
+    SELECT ${sql.raw(dateExpr)} AS label, COUNT(*) AS cnt
+    FROM appointments WHERE org_id = ${orgId} AND appointment_date >= ${gte.getTime()} AND appointment_date < ${lt.getTime()}
+    GROUP BY label ORDER BY label ASC
+  `);
+  return { labels: rows.map((r: any) => String(r.label)), data: rows.map((r: any) => Number(r.cnt)) };
 }
 
 async function queryResponseTimeMetric(
@@ -195,36 +196,37 @@ async function queryResponseTimeMetric(
   filters?: ReportConfig['filters'],
 ): Promise<{ labels: string[]; data: number[] }> {
   if (groupBy === 'user') {
-    const rows = await prisma.$queryRawUnsafe<Array<{ label: string; avg_rt: number }>>(
-      `SELECT u.full_name AS label, AVG(d.avg_response_time_seconds)::float AS avg_rt
-       FROM daily_message_stats d JOIN users u ON u.id = d.user_id
-       WHERE d.org_id = $1 AND d.stat_date >= $2::date AND d.stat_date < $3::date
-         AND d.avg_response_time_seconds IS NOT NULL
-       GROUP BY u.full_name ORDER BY avg_rt ASC`,
-      orgId, gte, lt,
-    );
-    return { labels: rows.map((r) => r.label), data: rows.map((r) => Math.round(r.avg_rt)) };
+    const rows = db.all(sql`
+      SELECT u.full_name AS label, AVG(d.avg_response_time_seconds) AS avg_rt
+      FROM daily_message_stats d JOIN users u ON u.id = d.user_id
+      WHERE d.org_id = ${orgId} AND d.stat_date >= ${gte.toISOString().split('T')[0]} AND d.stat_date < ${lt.toISOString().split('T')[0]}
+        AND d.avg_response_time_seconds IS NOT NULL
+      GROUP BY u.full_name ORDER BY avg_rt ASC
+    `);
+    return { labels: rows.map((r: any) => String(r.label)), data: rows.map((r: any) => Math.round(Number(r.avg_rt))) };
   }
 
   const dateExpr = groupByDateExpr(groupBy, 'stat_date');
-  const rows = await prisma.$queryRawUnsafe<Array<{ label: string; avg_rt: number }>>(
-    `SELECT ${dateExpr} AS label, AVG(avg_response_time_seconds)::float AS avg_rt
-     FROM daily_message_stats
-     WHERE org_id = $1 AND stat_date >= $2::date AND stat_date < $3::date
-       AND avg_response_time_seconds IS NOT NULL
-     GROUP BY label ORDER BY label ASC`,
-    orgId, gte, lt,
-  );
-  return { labels: rows.map((r) => String(r.label)), data: rows.map((r) => Math.round(r.avg_rt)) };
+  const rows = db.all(sql`
+    SELECT ${sql.raw(dateExpr)} AS label, AVG(avg_response_time_seconds) AS avg_rt
+    FROM daily_message_stats
+    WHERE org_id = ${orgId} AND stat_date >= ${gte.toISOString().split('T')[0]} AND stat_date < ${lt.toISOString().split('T')[0]}
+      AND avg_response_time_seconds IS NOT NULL
+    GROUP BY label ORDER BY label ASC
+  `);
+  return { labels: rows.map((r: any) => String(r.label)), data: rows.map((r: any) => Math.round(Number(r.avg_rt))) };
 }
 
 function groupByDateExpr(groupBy: string, col: string): string {
+  // SQLite strftime: %Y-%m-%d, %Y-%m (month), week is harder
+  // For week, we use strftime('%Y-W%W', date / 1000, 'unixepoch')
+  const dateCol = `datetime(${col} / 1000, 'unixepoch')`;
   switch (groupBy) {
     case 'week':
-      return `TO_CHAR(DATE_TRUNC('week', ${col}), 'YYYY-"W"IW')`;
+      return `strftime('%Y-W%W', ${dateCol})`;
     case 'month':
-      return `TO_CHAR(${col}, 'YYYY-MM')`;
+      return `strftime('%Y-%m', ${dateCol})`;
     default: // day
-      return `TO_CHAR(${col}, 'YYYY-MM-DD')`;
+      return `strftime('%Y-%m-%d', ${dateCol})`;
   }
 }

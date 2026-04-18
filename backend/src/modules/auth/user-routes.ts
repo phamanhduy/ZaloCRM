@@ -4,10 +4,12 @@
  * Role-based access: owner > admin > member.
  */
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { db } from '../../shared/database/db.js';
+import { users } from '../../shared/database/schema.js';
+import { eq, and, asc } from 'drizzle-orm';
 import { authMiddleware } from './auth-middleware.js';
 import bcrypt from 'bcryptjs';
-import { randomUUID } from 'node:crypto';
+import { v4 as uuidv4 } from 'uuid';
 import { logger } from '../../shared/utils/logger.js';
 
 export async function userRoutes(app: FastifyInstance) {
@@ -16,21 +18,16 @@ export async function userRoutes(app: FastifyInstance) {
   // GET /api/v1/users — list all users in org
   app.get('/api/v1/users', async (request: FastifyRequest) => {
     const user = request.user!;
-    const users = await prisma.user.findMany({
-      where: { orgId: user.orgId },
-      select: {
-        id: true,
-        email: true,
-        fullName: true,
-        role: true,
-        isActive: true,
-        teamId: true,
-        createdAt: true,
-        team: { select: { id: true, name: true } },
+    const allUsers = await db.query.users.findMany({
+      where: eq(users.orgId, user.orgId),
+      with: {
+        team: {
+          columns: { id: true, name: true }
+        }
       },
-      orderBy: { createdAt: 'asc' },
+      orderBy: [asc(users.createdAt)],
     });
-    return { users };
+    return { users: allUsers };
   });
 
   // POST /api/v1/users — create user (owner/admin only)
@@ -45,7 +42,7 @@ export async function userRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: 'Email, họ tên, mật khẩu là bắt buộc' });
     }
 
-    const existing = await prisma.user.findUnique({ where: { email } });
+    const existing = await db.query.users.findFirst({ where: eq(users.email, email) });
     if (existing) return reply.status(400).send({ error: 'Email đã tồn tại' });
 
     if (role === 'owner') return reply.status(400).send({ error: 'Không thể tạo thêm owner' });
@@ -54,28 +51,30 @@ export async function userRoutes(app: FastifyInstance) {
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
-    const user = await prisma.user.create({
-      data: {
-        id: randomUUID(),
-        orgId: currentUser.orgId,
-        email,
-        fullName,
-        passwordHash,
-        role,
-        teamId: teamId || null,
-      },
-      select: {
-        id: true,
-        email: true,
-        fullName: true,
-        role: true,
-        isActive: true,
-        createdAt: true,
-      },
+    const userId = uuidv4();
+    
+    await db.insert(users).values({
+      id: userId,
+      orgId: currentUser.orgId,
+      email,
+      fullName,
+      passwordHash,
+      role,
+      teamId: teamId || null,
     });
 
-    logger.info(`User created: ${user.email} by ${currentUser.email}`);
-    return user;
+    const newUser = await db.query.users.findFirst({
+      where: eq(users.id, userId),
+    });
+
+    logger.info(`User created: ${email} by ${currentUser.email}`);
+    
+    // Remove password hash from response
+    if (newUser) {
+      const { passwordHash: _, ...safeUser } = newUser;
+      return safeUser;
+    }
+    return reply.status(500).send({ error: 'Failed to create user' });
   });
 
   // PUT /api/v1/users/:id — update user info
@@ -93,27 +92,26 @@ export async function userRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: 'Không thể thay đổi role của chính mình' });
     }
 
-    const updateData: any = {};
+    const updateData: any = { updatedAt: new Date() };
     if (fullName !== undefined) updateData.fullName = fullName;
     if (email !== undefined) updateData.email = email;
     if (role !== undefined && currentUser.role === 'owner') updateData.role = role;
     if (teamId !== undefined) updateData.teamId = teamId || null;
     if (isActive !== undefined && currentUser.role === 'owner') updateData.isActive = isActive;
 
-    const user = await prisma.user.update({
-      where: { id, orgId: currentUser.orgId },
-      data: updateData,
-      select: {
-        id: true,
-        email: true,
-        fullName: true,
-        role: true,
-        isActive: true,
-        teamId: true,
-      },
+    await db.update(users)
+      .set(updateData)
+      .where(and(eq(users.id, id), eq(users.orgId, currentUser.orgId)));
+
+    const updatedUser = await db.query.users.findFirst({
+      where: eq(users.id, id),
     });
 
-    return user;
+    if (updatedUser) {
+      const { passwordHash: _, ...safeUser } = updatedUser;
+      return safeUser;
+    }
+    return reply.status(404).send({ error: 'User not found' });
   });
 
   // PUT /api/v1/users/:id/password — reset password (owner/admin only)
@@ -130,10 +128,9 @@ export async function userRoutes(app: FastifyInstance) {
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
-    await prisma.user.update({
-      where: { id, orgId: currentUser.orgId },
-      data: { passwordHash },
-    });
+    await db.update(users)
+      .set({ passwordHash, updatedAt: new Date() })
+      .where(and(eq(users.id, id), eq(users.orgId, currentUser.orgId)));
 
     return { success: true };
   });
@@ -150,10 +147,9 @@ export async function userRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: 'Không thể xóa chính mình' });
     }
 
-    await prisma.user.update({
-      where: { id, orgId: currentUser.orgId },
-      data: { isActive: false },
-    });
+    await db.update(users)
+      .set({ isActive: false, updatedAt: new Date() })
+      .where(and(eq(users.id, id), eq(users.orgId, currentUser.orgId)));
 
     return { success: true };
   });

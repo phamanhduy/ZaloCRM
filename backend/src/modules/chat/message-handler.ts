@@ -2,9 +2,11 @@
  * message-handler.ts — persists incoming Zalo messages to the database.
  * Called from zalo-pool's startListener on every 'message' / 'undo' event.
  */
-import { prisma } from '../../shared/database/prisma-client.js';
+import { db } from '../../shared/database/db.js';
+import { zaloAccounts, contacts, conversations, messages, organizations } from '../../shared/database/schema.js';
+import { eq, and, sql } from 'drizzle-orm';
 import { logger } from '../../shared/utils/logger.js';
-import { randomUUID } from 'node:crypto';
+import { v4 as uuidv4 } from 'uuid';
 import { emitWebhook } from '../api/webhook-service.js';
 import { runAutomationRules } from '../automation/automation-service.js';
 
@@ -24,22 +26,7 @@ export interface IncomingMessage {
 }
 
 export interface HandleMessageResult {
-  message: {
-    id: string;
-    conversationId: string;
-    zaloMsgId: string | null;
-    senderType: string;
-    senderUid: string | null;
-    senderName: string | null;
-    content: string | null;
-    contentType: string;
-    attachments: any;
-    isDeleted: boolean;
-    deletedAt: Date | null;
-    sentAt: Date;
-    repliedByUserId: string | null;
-    createdAt: Date;
-  };
+  message: any;
   conversationId: string;
   orgId: string;
   contactId: string | null;
@@ -49,9 +36,9 @@ export async function handleIncomingMessage(
   msg: IncomingMessage,
 ): Promise<HandleMessageResult | null> {
   try {
-    const account = await prisma.zaloAccount.findUnique({
-      where: { id: msg.accountId },
-      select: { orgId: true, ownerUserId: true },
+    const account = await db.query.zaloAccounts.findFirst({
+      where: eq(zaloAccounts.id, msg.accountId),
+      columns: { orgId: true, ownerUserId: true },
     });
     if (!account) return null;
 
@@ -59,81 +46,87 @@ export async function handleIncomingMessage(
 
     // Update lastActivity for lead scoring freshness
     if (contactId) {
-      prisma.contact.update({
-        where: { id: contactId },
-        data: { lastActivity: new Date() },
-      }).catch(() => {});
+      db.update(contacts)
+        .set({ lastActivity: new Date() })
+        .where(eq(contacts.id, contactId))
+        .catch(() => {});
     }
 
     const conversation = await findOrCreateConversation(msg, account.orgId, contactId);
 
     const sentAt = new Date(msg.timestamp);
-    const message = await prisma.message.create({
-      data: {
-        id: randomUUID(),
-        conversationId: conversation.id,
-        zaloMsgId: msg.msgId || null,
-        senderType: msg.isSelf ? 'self' : 'contact',
-        senderUid: msg.senderUid,
-        senderName: msg.senderName || null,
-        content: msg.content || '',
-        contentType: msg.contentType || 'text',
-        attachments: msg.attachments ?? [],
-        sentAt,
-      },
+    const messageId = uuidv4();
+    
+    await db.insert(messages).values({
+      id: messageId,
+      conversationId: conversation.id,
+      zaloMsgId: msg.msgId || null,
+      senderType: msg.isSelf ? 'self' : 'contact',
+      senderUid: msg.senderUid,
+      senderName: msg.senderName || null,
+      content: msg.content || '',
+      contentType: msg.contentType || 'text',
+      attachments: msg.attachments ?? [],
+      sentAt,
+    });
+
+    const message = await db.query.messages.findFirst({
+      where: eq(messages.id, messageId)
     });
 
     await updateConversationAfterMessage(conversation.id, sentAt, msg.isSelf);
 
     // Track first outbound contact date — set once when agent sends first message
     if (msg.isSelf && contactId) {
-      prisma.contact.updateMany({
-        where: { id: contactId, firstContactDate: null },
-        data: { firstContactDate: new Date(msg.timestamp) },
-      }).catch(() => {});
+      db.update(contacts)
+        .set({ firstContactDate: new Date(msg.timestamp) })
+        .where(and(eq(contacts.id, contactId), sql`${contacts.firstContactDate} IS NULL`))
+        .catch(() => {});
     }
 
     // Emit webhook for message event (fire-and-forget)
-    emitWebhook(account.orgId, msg.isSelf ? 'message.sent' : 'message.received', {
-      messageId: message.id,
-      conversationId: conversation.id,
-      senderUid: msg.senderUid,
-      content: msg.content,
-      contentType: msg.contentType,
-      sentAt: message.sentAt,
-    });
+    if (message) {
+      emitWebhook(account.orgId, msg.isSelf ? 'message.sent' : 'message.received', {
+        messageId: message.id,
+        conversationId: conversation.id,
+        senderUid: msg.senderUid,
+        content: msg.content,
+        contentType: msg.contentType,
+        sentAt: message.sentAt,
+      });
+    }
 
-    if (!msg.isSelf) {
-      const org = await prisma.organization.findUnique({
-        where: { id: account.orgId },
-        select: { id: true, name: true },
+    if (!msg.isSelf && message) {
+      const org = await db.query.organizations.findFirst({
+        where: eq(organizations.id, account.orgId),
+        columns: { id: true, name: true },
       });
       const contact = contactId
-        ? await prisma.contact.findUnique({
-            where: { id: contactId },
-            select: { id: true, fullName: true, phone: true, status: true, source: true, assignedUserId: true },
+        ? await db.query.contacts.findFirst({
+            where: eq(contacts.id, contactId),
+            columns: { id: true, fullName: true, phone: true, status: true, source: true, assignedUserId: true },
           })
         : null;
-      const conversationDetails = await prisma.conversation.findUnique({
-        where: { id: conversation.id },
-        select: { id: true, unreadCount: true, externalThreadId: true, threadType: true, zaloAccountId: true },
+      const conversationDetails = await db.query.conversations.findFirst({
+        where: eq(conversations.id, conversation.id),
+        columns: { id: true, unreadCount: true, externalThreadId: true, threadType: true, zaloAccountId: true },
       });
 
       void runAutomationRules({
         trigger: 'message_received',
         orgId: account.orgId,
-        org,
-        contact,
+        org: org as any,
+        contact: contact as any,
         conversation: conversationDetails
           ? {
               id: conversationDetails.id,
               unreadCount: conversationDetails.unreadCount,
-              threadId: conversationDetails.externalThreadId,
-              threadType: conversationDetails.threadType,
+              threadId: conversationDetails.externalThreadId || '',
+              threadType: conversationDetails.threadType as any,
               zaloAccountId: conversationDetails.zaloAccountId,
             }
           : null,
-        message: { id: message.id, content: message.content, contentType: message.contentType, senderType: message.senderType },
+        message: { id: message.id, content: message.content || '', contentType: message.contentType, senderType: message.senderType },
       });
     }
 
@@ -154,29 +147,27 @@ async function upsertContact(msg: IncomingMessage, orgId: string): Promise<strin
   // Group messages: create/update a "contact" record representing the group
   if (msg.threadType === 'group') {
     const groupUid = msg.threadId;
-    let groupContact = await prisma.contact.findFirst({
-      where: { zaloUid: groupUid, orgId },
-      select: { id: true, fullName: true },
+    let groupContact = await db.query.contacts.findFirst({
+      where: and(eq(contacts.zaloUid, groupUid), eq(contacts.orgId, orgId)),
+      columns: { id: true, fullName: true },
     });
 
     if (!groupContact) {
-      groupContact = await prisma.contact.create({
-        data: {
-          id: randomUUID(),
-          orgId,
-          zaloUid: groupUid,
-          fullName: msg.groupName || 'Nhóm',
-          metadata: { isGroup: true },
-        },
-        select: { id: true, fullName: true },
+      const id = uuidv4();
+      await db.insert(contacts).values({
+        id,
+        orgId,
+        zaloUid: groupUid,
+        fullName: msg.groupName || 'Nhóm',
+        metadata: { isGroup: true },
       });
+      groupContact = { id, fullName: msg.groupName || 'Nhóm' };
       // Emit webhook for new contact created
       emitWebhook(orgId, 'contact.created', { contactId: groupContact.id, fullName: groupContact.fullName });
     } else if (msg.groupName && groupContact.fullName !== msg.groupName) {
-      await prisma.contact.update({
-        where: { id: groupContact.id },
-        data: { fullName: msg.groupName },
-      });
+      await db.update(contacts)
+        .set({ fullName: msg.groupName })
+        .where(eq(contacts.id, groupContact.id));
     }
     return groupContact.id;
   }
@@ -184,28 +175,26 @@ async function upsertContact(msg: IncomingMessage, orgId: string): Promise<strin
   // User messages: self messages don't create a contact
   if (msg.isSelf) return null;
 
-  let contact = await prisma.contact.findFirst({
-    where: { zaloUid: msg.senderUid, orgId },
-    select: { id: true, fullName: true },
+  let contact = await db.query.contacts.findFirst({
+    where: and(eq(contacts.zaloUid, msg.senderUid), eq(contacts.orgId, orgId)),
+    columns: { id: true, fullName: true },
   });
 
   if (!contact) {
-    contact = await prisma.contact.create({
-      data: {
-        id: randomUUID(),
-        orgId,
-        zaloUid: msg.senderUid,
-        fullName: msg.senderName || 'Unknown',
-      },
-      select: { id: true, fullName: true },
+    const id = uuidv4();
+    await db.insert(contacts).values({
+      id,
+      orgId,
+      zaloUid: msg.senderUid,
+      fullName: msg.senderName || 'Unknown',
     });
+    contact = { id, fullName: msg.senderName || 'Unknown' };
     // Emit webhook for new contact created
     emitWebhook(orgId, 'contact.created', { contactId: contact.id, fullName: contact.fullName });
   } else if (msg.senderName && contact.fullName !== msg.senderName) {
-    await prisma.contact.update({
-      where: { id: contact.id },
-      data: { fullName: msg.senderName },
-    });
+    await db.update(contacts)
+      .set({ fullName: msg.senderName })
+      .where(eq(contacts.id, contact.id));
   }
 
   return contact.id;
@@ -219,27 +208,27 @@ async function findOrCreateConversation(
 ) {
   const externalThreadId = msg.threadId;
 
-  const existing = await prisma.conversation.findFirst({
-    where: { zaloAccountId: msg.accountId, externalThreadId },
-    select: { id: true },
+  const existing = await db.query.conversations.findFirst({
+    where: and(eq(conversations.zaloAccountId, msg.accountId), eq(conversations.externalThreadId, externalThreadId)),
+    columns: { id: true },
   });
 
   if (existing) return existing;
 
-  return prisma.conversation.create({
-    data: {
-      id: randomUUID(),
-      orgId,
-      zaloAccountId: msg.accountId,
-      contactId: msg.threadType === 'user' ? contactId : contactId,
-      threadType: msg.threadType,
-      externalThreadId,
-      lastMessageAt: new Date(msg.timestamp),
-      unreadCount: msg.isSelf ? 0 : 1,
-      isReplied: msg.isSelf,
-    },
-    select: { id: true },
+  const id = uuidv4();
+  await db.insert(conversations).values({
+    id,
+    orgId,
+    zaloAccountId: msg.accountId,
+    contactId: contactId,
+    threadType: msg.threadType,
+    externalThreadId,
+    lastMessageAt: new Date(msg.timestamp),
+    unreadCount: msg.isSelf ? 0 : 1,
+    isReplied: msg.isSelf,
   });
+
+  return { id };
 }
 
 // Update conversation metadata after a new message
@@ -253,19 +242,20 @@ async function updateConversationAfterMessage(
     updateData.isReplied = true;
     updateData.unreadCount = 0;
   } else {
-    updateData.unreadCount = { increment: 1 };
+    updateData.unreadCount = sql`${conversations.unreadCount} + 1`;
     updateData.isReplied = false;
   }
-  await prisma.conversation.update({ where: { id: conversationId }, data: updateData });
+  await db.update(conversations)
+    .set(updateData)
+    .where(eq(conversations.id, conversationId));
 }
 
 // Soft-delete a message by its Zalo message ID
 export async function handleMessageUndo(accountId: string, zaloMsgId: string): Promise<void> {
   try {
-    await prisma.message.updateMany({
-      where: { zaloMsgId: String(zaloMsgId) },
-      data: { isDeleted: true, deletedAt: new Date() },
-    });
+    await db.update(messages)
+      .set({ isDeleted: true, deletedAt: new Date() })
+      .where(eq(messages.zaloMsgId, String(zaloMsgId)));
     logger.info(`[message-handler] Undo message ${zaloMsgId} for account ${accountId}`);
   } catch (err) {
     logger.error('[message-handler] handleMessageUndo error:', err);

@@ -4,15 +4,18 @@
  * All routes require JWT auth and are scoped to user's org.
  */
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { db } from '../../shared/database/db.js';
+import { appointments, contacts, users } from '../../shared/database/schema.js';
+import { eq, and, gte, lte, asc, desc, count } from 'drizzle-orm';
 import { authMiddleware } from '../auth/auth-middleware.js';
 import { logger } from '../../shared/utils/logger.js';
+import { v4 as uuidv4 } from 'uuid';
 
 type QueryParams = Record<string, string>;
 
-const APPOINTMENT_INCLUDE = {
-  contact: { select: { id: true, fullName: true, phone: true, avatarUrl: true } },
-  assignedUser: { select: { id: true, fullName: true } },
+const APPOINTMENT_WITH = {
+  contact: { columns: { id: true, fullName: true, phone: true, avatarUrl: true } },
+  assignedUser: { columns: { id: true, fullName: true } },
 } as const;
 
 export async function appointmentRoutes(app: FastifyInstance): Promise<void> {
@@ -26,13 +29,17 @@ export async function appointmentRoutes(app: FastifyInstance): Promise<void> {
       const start = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 0, 0, 0);
       const end = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59, 999);
 
-      const appointments = await prisma.appointment.findMany({
-        where: { orgId: user.orgId, appointmentDate: { gte: start, lte: end } },
-        include: APPOINTMENT_INCLUDE,
-        orderBy: [{ appointmentTime: 'asc' }, { appointmentDate: 'asc' }],
+      const items = await db.query.appointments.findMany({
+        where: and(
+          eq(appointments.orgId, user.orgId), 
+          gte(appointments.appointmentDate, start), 
+          lte(appointments.appointmentDate, end)
+        ),
+        with: APPOINTMENT_WITH,
+        orderBy: [asc(appointments.appointmentTime), asc(appointments.appointmentDate)],
       });
 
-      return { appointments, total: appointments.length };
+      return { appointments: items, total: items.length };
     } catch (err) {
       logger.error('[appointments] Today error:', err);
       return reply.status(500).send({ error: 'Failed to fetch today appointments' });
@@ -47,17 +54,18 @@ export async function appointmentRoutes(app: FastifyInstance): Promise<void> {
       const in7Days = new Date(now);
       in7Days.setDate(in7Days.getDate() + 7);
 
-      const appointments = await prisma.appointment.findMany({
-        where: {
-          orgId: user.orgId,
-          appointmentDate: { gte: now, lte: in7Days },
-          status: 'scheduled',
-        },
-        include: APPOINTMENT_INCLUDE,
-        orderBy: [{ appointmentDate: 'asc' }, { appointmentTime: 'asc' }],
+      const items = await db.query.appointments.findMany({
+        where: and(
+          eq(appointments.orgId, user.orgId),
+          gte(appointments.appointmentDate, now),
+          lte(appointments.appointmentDate, in7Days),
+          eq(appointments.status, 'scheduled'),
+        ),
+        with: APPOINTMENT_WITH,
+        orderBy: [asc(appointments.appointmentDate), asc(appointments.appointmentTime)],
       });
 
-      return { appointments, total: appointments.length };
+      return { appointments: items, total: items.length };
     } catch (err) {
       logger.error('[appointments] Upcoming error:', err);
       return reply.status(500).send({ error: 'Failed to fetch upcoming appointments' });
@@ -77,30 +85,28 @@ export async function appointmentRoutes(app: FastifyInstance): Promise<void> {
         dateTo = '',
       } = request.query as QueryParams;
 
-      const where: any = { orgId: user.orgId };
-      if (status) where.status = status;
-      if (contactId) where.contactId = contactId;
-      if (dateFrom || dateTo) {
-        where.appointmentDate = {};
-        if (dateFrom) where.appointmentDate.gte = new Date(dateFrom);
-        if (dateTo) where.appointmentDate.lte = new Date(dateTo);
-      }
+      let filters = eq(appointments.orgId, user.orgId);
+      if (status) filters = and(filters, eq(appointments.status, status)) as any;
+      if (contactId) filters = and(filters, eq(appointments.contactId, contactId)) as any;
+      
+      if (dateFrom) filters = and(filters, gte(appointments.appointmentDate, new Date(dateFrom))) as any;
+      if (dateTo) filters = and(filters, lte(appointments.appointmentDate, new Date(dateTo))) as any;
 
       const pageNum = parseInt(page);
       const limitNum = parseInt(limit);
 
-      const [appointments, total] = await Promise.all([
-        prisma.appointment.findMany({
-          where,
-          include: APPOINTMENT_INCLUDE,
-          orderBy: [{ appointmentDate: 'desc' }, { appointmentTime: 'asc' }],
-          skip: (pageNum - 1) * limitNum,
-          take: limitNum,
+      const [items, totalResult] = await Promise.all([
+        db.query.appointments.findMany({
+          where: filters,
+          with: APPOINTMENT_WITH,
+          orderBy: [desc(appointments.appointmentDate), asc(appointments.appointmentTime)],
+          offset: (pageNum - 1) * limitNum,
+          limit: limitNum,
         }),
-        prisma.appointment.count({ where }),
+        db.select({ value: count() }).from(appointments).where(filters),
       ]);
 
-      return { appointments, total, page: pageNum, limit: limitNum };
+      return { appointments: items, total: totalResult[0].value, page: pageNum, limit: limitNum };
     } catch (err) {
       logger.error('[appointments] List error:', err);
       return reply.status(500).send({ error: 'Failed to fetch appointments' });
@@ -113,9 +119,9 @@ export async function appointmentRoutes(app: FastifyInstance): Promise<void> {
       const user = request.user!;
       const { id } = request.params as { id: string };
 
-      const appointment = await prisma.appointment.findFirst({
-        where: { id, orgId: user.orgId },
-        include: APPOINTMENT_INCLUDE,
+      const appointment = await db.query.appointments.findFirst({
+        where: and(eq(appointments.id, id), eq(appointments.orgId, user.orgId)),
+        with: APPOINTMENT_WITH,
       });
 
       if (!appointment) return reply.status(404).send({ error: 'Appointment not found' });
@@ -137,29 +143,34 @@ export async function appointmentRoutes(app: FastifyInstance): Promise<void> {
       }
 
       // Deduplication: prevent same contact + same date within org
-      const existing = await prisma.appointment.findFirst({
-        where: {
-          contactId: body.contactId,
-          appointmentDate: new Date(body.appointmentDate),
-          orgId: user.orgId,
-        },
+      const appointmentDate = new Date(body.appointmentDate);
+      const existing = await db.query.appointments.findFirst({
+        where: and(
+          eq(appointments.contactId, body.contactId),
+          eq(appointments.appointmentDate, appointmentDate),
+          eq(appointments.orgId, user.orgId),
+        ),
       });
       if (existing) {
         return reply.status(409).send({ error: 'Lịch hẹn đã tồn tại cho ngày này' });
       }
 
-      const appointment = await prisma.appointment.create({
-        data: {
-          orgId: user.orgId,
-          contactId: body.contactId,
-          assignedUserId: body.assignedUserId ?? user.id,
-          appointmentDate: new Date(body.appointmentDate),
-          appointmentTime: body.appointmentTime,
-          type: body.type,
-          status: body.status ?? 'scheduled',
-          notes: body.notes,
-        },
-        include: APPOINTMENT_INCLUDE,
+      const id = uuidv4();
+      await db.insert(appointments).values({
+        id,
+        orgId: user.orgId,
+        contactId: body.contactId,
+        assignedUserId: body.assignedUserId ?? user.id,
+        appointmentDate,
+        appointmentTime: body.appointmentTime,
+        type: body.type,
+        status: body.status ?? 'scheduled',
+        notes: body.notes,
+      });
+
+      const appointment = await db.query.appointments.findFirst({
+        where: eq(appointments.id, id),
+        with: APPOINTMENT_WITH,
       });
 
       return reply.status(201).send(appointment);
@@ -176,12 +187,14 @@ export async function appointmentRoutes(app: FastifyInstance): Promise<void> {
       const { id } = request.params as { id: string };
       const body = request.body as Record<string, any>;
 
-      const existing = await prisma.appointment.findFirst({ where: { id, orgId: user.orgId }, select: { id: true } });
+      const existing = await db.query.appointments.findFirst({ 
+        where: and(eq(appointments.id, id), eq(appointments.orgId, user.orgId)), 
+        columns: { id: true } 
+      });
       if (!existing) return reply.status(404).send({ error: 'Appointment not found' });
 
-      const updated = await prisma.appointment.update({
-        where: { id },
-        data: {
+      await db.update(appointments)
+        .set({
           contactId: body.contactId,
           assignedUserId: body.assignedUserId,
           appointmentDate: body.appointmentDate ? new Date(body.appointmentDate) : undefined,
@@ -189,8 +202,12 @@ export async function appointmentRoutes(app: FastifyInstance): Promise<void> {
           type: body.type,
           status: body.status,
           notes: body.notes,
-        },
-        include: APPOINTMENT_INCLUDE,
+        })
+        .where(eq(appointments.id, id));
+
+      const updated = await db.query.appointments.findFirst({
+        where: eq(appointments.id, id),
+        with: APPOINTMENT_WITH,
       });
 
       return updated;
@@ -206,10 +223,13 @@ export async function appointmentRoutes(app: FastifyInstance): Promise<void> {
       const user = request.user!;
       const { id } = request.params as { id: string };
 
-      const existing = await prisma.appointment.findFirst({ where: { id, orgId: user.orgId }, select: { id: true } });
+      const existing = await db.query.appointments.findFirst({ 
+        where: and(eq(appointments.id, id), eq(appointments.orgId, user.orgId)), 
+        columns: { id: true } 
+      });
       if (!existing) return reply.status(404).send({ error: 'Appointment not found' });
 
-      await prisma.appointment.delete({ where: { id } });
+      await db.delete(appointments).where(eq(appointments.id, id));
       return { success: true };
     } catch (err) {
       logger.error('[appointments] Delete error:', err);

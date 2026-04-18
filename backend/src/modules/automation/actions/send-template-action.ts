@@ -1,5 +1,7 @@
-import { randomUUID } from 'node:crypto';
-import { prisma } from '../../../shared/database/prisma-client.js';
+import { v4 as uuidv4 } from 'uuid';
+import { db } from '../../../shared/database/db.js';
+import { messageTemplates, messages } from '../../../shared/database/schema.js';
+import { eq, and } from 'drizzle-orm';
 import { renderMessageTemplate } from '../template-renderer.js';
 import { zaloPool } from '../../zalo/zalo-pool.js';
 import { zaloRateLimiter } from '../../zalo/zalo-rate-limiter.js';
@@ -19,9 +21,9 @@ export async function sendTemplateAction(input: {
 }) {
   if (!input.threadId) return null;
 
-  const template = await prisma.messageTemplate.findFirst({
-    where: { id: input.templateId, orgId: input.orgId },
-    select: { id: true, content: true },
+  const template = await db.query.messageTemplates.findFirst({
+    where: and(eq(messageTemplates.id, input.templateId), eq(messageTemplates.orgId, input.orgId)),
+    columns: { id: true, content: true },
   });
   if (!template) return null;
 
@@ -35,19 +37,20 @@ export async function sendTemplateAction(input: {
   if (!limits.allowed) return null;
 
   zaloRateLimiter.recordSend(input.zaloAccountId);
-  const threadType = input.threadType === 'group' ? 1 : 0;
-  await instance.api.sendMessage({ msg: content }, input.threadId, threadType);
+  const threadTypeNum = input.threadType === 'group' ? 1 : 0;
+  await instance.api.sendMessage({ msg: content }, input.threadId, threadTypeNum);
 
-  return prisma.message.create({
-    data: {
-      id: randomUUID(),
-      conversationId: input.conversationId,
-      senderType: 'self',
-      senderUid: null,
-      senderName: 'Automation',
-      content,
-      contentType: 'text',
-      sentAt: new Date(),
-    },
+  const messageId = uuidv4();
+  await db.insert(messages).values({
+    id: messageId,
+    conversationId: input.conversationId,
+    senderType: 'self',
+    senderUid: null,
+    senderName: 'Automation',
+    content,
+    contentType: 'text',
+    sentAt: new Date(),
   });
+
+  return await db.query.messages.findFirst({ where: eq(messages.id, messageId) });
 }

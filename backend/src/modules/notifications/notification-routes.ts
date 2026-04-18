@@ -3,7 +3,9 @@
  * Sources: unreplied conversations, today/tomorrow appointments, disconnected Zalo accounts.
  */
 import type { FastifyInstance } from 'fastify';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { db } from '../../shared/database/db.js';
+import { conversations, appointments, zaloAccounts } from '../../shared/database/schema.js';
+import { eq, and, lt, gte, count } from 'drizzle-orm';
 import { authMiddleware } from '../auth/auth-middleware.js';
 import { zaloPool } from '../zalo/zalo-pool.js';
 
@@ -25,9 +27,15 @@ export async function notificationRoutes(app: FastifyInstance) {
 
     // 1. Unreplied conversations > 30 min
     const thirtyMinAgo = new Date(Date.now() - 30 * 60000);
-    const unreplied = await prisma.conversation.count({
-      where: { orgId: user.orgId, isReplied: false, lastMessageAt: { lt: thirtyMinAgo } },
-    });
+    const unrepliedRes = await db.select({ value: count() })
+      .from(conversations)
+      .where(and(
+        eq(conversations.orgId, user.orgId), 
+        eq(conversations.isReplied, false), 
+        lt(conversations.lastMessageAt, thirtyMinAgo)
+      ));
+    
+    const unreplied = unrepliedRes[0].value;
     if (unreplied > 0) {
       notifications.push({
         id: 'unreplied',
@@ -45,14 +53,15 @@ export async function notificationRoutes(app: FastifyInstance) {
     const todayEnd = new Date(todayStart);
     todayEnd.setDate(todayEnd.getDate() + 1);
 
-    const todayApts = await prisma.appointment.findMany({
-      where: {
-        orgId: user.orgId,
-        appointmentDate: { gte: todayStart, lt: todayEnd },
-        status: 'scheduled',
-      },
-      include: { contact: { select: { fullName: true } } },
-      take: 5,
+    const todayApts = await db.query.appointments.findMany({
+      where: and(
+        eq(appointments.orgId, user.orgId),
+        gte(appointments.appointmentDate, todayStart),
+        lt(appointments.appointmentDate, todayEnd),
+        eq(appointments.status, 'scheduled'),
+      ),
+      with: { contact: { columns: { fullName: true } } },
+      limit: 5,
     });
     for (const apt of todayApts) {
       notifications.push({
@@ -70,13 +79,16 @@ export async function notificationRoutes(app: FastifyInstance) {
     const tomorrowEnd = new Date(tomorrowStart);
     tomorrowEnd.setDate(tomorrowEnd.getDate() + 1);
 
-    const tmrApts = await prisma.appointment.count({
-      where: {
-        orgId: user.orgId,
-        appointmentDate: { gte: tomorrowStart, lt: tomorrowEnd },
-        status: 'scheduled',
-      },
-    });
+    const tmrAptsRes = await db.select({ value: count() })
+      .from(appointments)
+      .where(and(
+        eq(appointments.orgId, user.orgId),
+        gte(appointments.appointmentDate, tomorrowStart),
+        lt(appointments.appointmentDate, tomorrowEnd),
+        eq(appointments.status, 'scheduled'),
+      ));
+      
+    const tmrApts = tmrAptsRes[0].value;
     if (tmrApts > 0) {
       notifications.push({
         id: 'tmr-apts',
@@ -89,9 +101,9 @@ export async function notificationRoutes(app: FastifyInstance) {
     }
 
     // 4. Disconnected Zalo accounts
-    const accounts = await prisma.zaloAccount.findMany({
-      where: { orgId: user.orgId },
-      select: { id: true, displayName: true },
+    const accounts = await db.query.zaloAccounts.findMany({
+      where: eq(zaloAccounts.orgId, user.orgId),
+      columns: { id: true, displayName: true },
     });
     for (const acc of accounts) {
       const status = zaloPool.getStatus(acc.id);

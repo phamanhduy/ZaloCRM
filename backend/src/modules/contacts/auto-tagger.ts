@@ -2,7 +2,9 @@
  * auto-tagger.ts — Applies auto-tags to contacts based on lead score and activity.
  * Preserves user-defined tags; removes and replaces auto-tags on each run.
  */
-import { prisma } from '../../shared/database/prisma-client.js';
+import { db } from '../../shared/database/db.js';
+import { contacts, appointments } from '../../shared/database/schema.js';
+import { eq, and, gte } from 'drizzle-orm';
 
 const AUTO_TAGS = [
   'hot-lead',
@@ -18,9 +20,9 @@ export async function applyAutoTags(
   score: number,
   lastActivity: Date | null,
 ): Promise<string[]> {
-  const contact = await prisma.contact.findUnique({
-    where: { id: contactId },
-    select: { tags: true },
+  const contact = await db.query.contacts.findFirst({
+    where: eq(contacts.id, contactId),
+    columns: { tags: true },
   });
 
   const raw = contact?.tags;
@@ -44,13 +46,13 @@ export async function applyAutoTags(
   }
 
   // Future appointment tag
-  const futureApt = await prisma.appointment.findFirst({
-    where: {
-      contactId,
-      status: 'scheduled',
-      appointmentDate: { gte: new Date() },
-    },
-    select: { id: true },
+  const futureApt = await db.query.appointments.findFirst({
+    where: and(
+      eq(appointments.contactId, contactId),
+      eq(appointments.status, 'scheduled'),
+      gte(appointments.appointmentDate, new Date())
+    ),
+    columns: { id: true },
   });
   if (futureApt) newAutoTags.push('has-appointment');
 

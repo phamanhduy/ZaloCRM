@@ -1,11 +1,15 @@
-import { prisma } from '../../../shared/database/prisma-client.js';
+import { db } from '../../../shared/database/db.js';
+import { users, contacts } from '../../../shared/database/schema.js';
+import { eq, and } from 'drizzle-orm';
 
 export async function assignUserAction(contactId: string, userId: string, orgId: string) {
-  const user = await prisma.user.findFirst({ where: { id: userId, orgId }, select: { id: true } });
+  const user = await db.query.users.findFirst({ 
+    where: and(eq(users.id, userId), eq(users.orgId, orgId)), 
+    columns: { id: true } 
+  });
   if (!user) return null;
 
-  return prisma.contact.update({
-    where: { id: contactId },
-    data: { assignedUserId: userId },
-  });
+  return db.update(contacts)
+    .set({ assignedUserId: userId, updatedAt: new Date() })
+    .where(eq(contacts.id, contactId));
 }

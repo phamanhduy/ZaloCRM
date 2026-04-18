@@ -2,8 +2,11 @@
  * duplicate-detector.ts — Detects duplicate contacts per org.
  * Groups by phone, zaloUid, or fuzzy name matching.
  */
-import { prisma } from '../../shared/database/prisma-client.js';
+import { db } from '../../shared/database/db.js';
+import { organizations, contacts, duplicateGroups } from '../../shared/database/schema.js';
+import { eq, and, isNull, sql } from 'drizzle-orm';
 import { logger } from '../../shared/utils/logger.js';
+import { v4 as uuidv4 } from 'uuid';
 
 function levenshteinRatio(a: string, b: string): number {
   const la = a.length;
@@ -39,28 +42,41 @@ async function saveGroup(
   confidence: number,
 ): Promise<void> {
   const sorted = [...contactIds].sort();
-  const existing = await prisma.duplicateGroup.findFirst({
-    where: { orgId, resolved: false, contactIds: { equals: sorted } },
+  const sortedJson = JSON.stringify(sorted);
+  
+  // In SQLite, we compare the JSON string
+  const existing = await db.query.duplicateGroups.findFirst({
+    where: and(
+      eq(duplicateGroups.orgId, orgId), 
+      eq(duplicateGroups.resolved, false), 
+      sql`${duplicateGroups.contactIds} = ${sortedJson}`
+    ),
   });
+  
   if (existing) return;
-  await prisma.duplicateGroup.create({
-    data: { orgId, contactIds: sorted, matchType, confidence },
+  
+  await db.insert(duplicateGroups).values({
+    id: uuidv4(),
+    orgId,
+    contactIds: sorted,
+    matchType,
+    confidence
   });
 }
 
 export async function detectDuplicates(): Promise<void> {
-  const orgs = await prisma.organization.findMany({ select: { id: true } });
+  const orgs = await db.query.organizations.findMany({ columns: { id: true } });
   let totalGroups = 0;
 
   for (const org of orgs) {
-    const contacts = await prisma.contact.findMany({
-      where: { orgId: org.id, mergedInto: null },
-      select: { id: true, phone: true, zaloUid: true, fullName: true },
+    const orgContacts = await db.query.contacts.findMany({
+      where: and(eq(contacts.orgId, org.id), isNull(contacts.mergedInto)),
+      columns: { id: true, phone: true, zaloUid: true, fullName: true },
     });
 
     // Group by normalized phone
     const byPhone = new Map<string, string[]>();
-    for (const c of contacts) {
+    for (const c of orgContacts) {
       if (!c.phone) continue;
       const key = normPhone(c.phone);
       if (!byPhone.has(key)) byPhone.set(key, []);
@@ -75,7 +91,7 @@ export async function detectDuplicates(): Promise<void> {
 
     // Group by exact zaloUid
     const byZalo = new Map<string, string[]>();
-    for (const c of contacts) {
+    for (const c of orgContacts) {
       if (!c.zaloUid) continue;
       if (!byZalo.has(c.zaloUid)) byZalo.set(c.zaloUid, []);
       byZalo.get(c.zaloUid)!.push(c.id);
@@ -88,7 +104,7 @@ export async function detectDuplicates(): Promise<void> {
     }
 
     // Fuzzy name matching — only contacts with no phone AND no zaloUid
-    const noIdContacts = contacts.filter((c) => !c.phone && !c.zaloUid && !!c.fullName);
+    const noIdContacts = orgContacts.filter((c) => !c.phone && !c.zaloUid && !!c.fullName);
     for (let i = 0; i < noIdContacts.length; i++) {
       for (let j = i + 1; j < noIdContacts.length; j++) {
         const nameA = normName(noIdContacts[i].fullName!);

@@ -4,7 +4,9 @@
  * All routes require JWT auth and are scoped to the user's org.
  */
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { db } from '../../shared/database/db.js';
+import { appointments } from '../../shared/database/schema.js';
+import { eq, and, desc } from 'drizzle-orm';
 import { authMiddleware } from '../auth/auth-middleware.js';
 import { logger } from '../../shared/utils/logger.js';
 
@@ -17,13 +19,13 @@ export async function contactSubResourceRoutes(app: FastifyInstance): Promise<vo
       const user = request.user!;
       const { id } = request.params as { id: string };
 
-      const appointments = await prisma.appointment.findMany({
-        where: { contactId: id, orgId: user.orgId },
-        orderBy: { appointmentDate: 'desc' },
-        take: 20,
+      const items = await db.query.appointments.findMany({
+        where: and(eq(appointments.contactId, id), eq(appointments.orgId, user.orgId)),
+        orderBy: [desc(appointments.appointmentDate)],
+        limit: 20,
       });
 
-      return { appointments };
+      return { appointments: items };
     } catch (err) {
       logger.error('[contacts] Appointments by contact error:', err);
       return reply.status(500).send({ error: 'Failed to fetch appointments' });

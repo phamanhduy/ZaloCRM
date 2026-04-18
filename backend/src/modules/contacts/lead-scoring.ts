@@ -2,7 +2,9 @@
  * lead-scoring.ts — Computes lead scores for contacts.
  * Score factors: recent messages, scheduled appointments, status, last activity.
  */
-import { prisma } from '../../shared/database/prisma-client.js';
+import { db } from '../../shared/database/db.js';
+import { contacts, conversations, messages, appointments } from '../../shared/database/schema.js';
+import { eq, and, gte, desc, inArray, count, isNull } from 'drizzle-orm';
 import { logger } from '../../shared/utils/logger.js';
 import { applyAutoTags } from './auto-tagger.js';
 
@@ -11,41 +13,49 @@ export async function computeLeadScore(contactId: string): Promise<number> {
   const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
 
   // Count messages in last 7 days via conversations linked to contact
-  const conversations = await prisma.conversation.findMany({
-    where: { contactId },
-    select: { id: true },
+  const contactConvs = await db.query.conversations.findMany({
+    where: eq(conversations.contactId, contactId),
+    columns: { id: true },
   });
-  const convIds = conversations.map((c) => c.id);
+  const convIds = contactConvs.map((c) => c.id);
 
-  const recentMessages = convIds.length
-    ? await prisma.message.count({
-        where: { conversationId: { in: convIds }, sentAt: { gte: sevenDaysAgo } },
-      })
-    : 0;
+  let recentMessages = 0;
+  if (convIds.length > 0) {
+    const res = await db.select({ value: count() })
+      .from(messages)
+      .where(and(inArray(messages.conversationId, convIds), gte(messages.sentAt, sevenDaysAgo)));
+    recentMessages = res[0].value;
+  }
 
   // Check for upcoming scheduled appointment
-  const futureAppointment = await prisma.appointment.findFirst({
-    where: { contactId, status: 'scheduled', appointmentDate: { gte: now } },
-    select: { appointmentDate: true },
+  const futureAppointment = await db.query.appointments.findFirst({
+    where: and(
+      eq(appointments.contactId, contactId), 
+      eq(appointments.status, 'scheduled'), 
+      gte(appointments.appointmentDate, now)
+    ),
+    columns: { appointmentDate: true },
   });
 
-  const contact = await prisma.contact.findUnique({
-    where: { id: contactId },
-    select: { status: true, updatedAt: true },
+  const contact = await db.query.contacts.findFirst({
+    where: eq(contacts.id, contactId),
+    columns: { status: true, updatedAt: true },
   });
 
   // Latest message sentAt
-  const latestMsg = convIds.length
-    ? await prisma.message.findFirst({
-        where: { conversationId: { in: convIds } },
-        orderBy: { sentAt: 'desc' },
-        select: { sentAt: true },
-      })
-    : null;
+  let latestMsgSentAt: Date | null = null;
+  if (convIds.length > 0) {
+    const latestMsg = await db.query.messages.findFirst({
+      where: inArray(messages.conversationId, convIds),
+      orderBy: [desc(messages.sentAt)],
+      columns: { sentAt: true },
+    });
+    if (latestMsg) latestMsgSentAt = latestMsg.sentAt;
+  }
 
   // Compute lastActivity = max of: latest message, latest appointment, updatedAt
   const candidates: Date[] = [contact?.updatedAt ?? now];
-  if (latestMsg) candidates.push(latestMsg.sentAt);
+  if (latestMsgSentAt) candidates.push(latestMsgSentAt);
   if (futureAppointment) candidates.push(futureAppointment.appointmentDate);
   const lastActivity = new Date(Math.max(...candidates.map((d) => d.getTime())));
 
@@ -70,49 +80,53 @@ export async function computeLeadScore(contactId: string): Promise<number> {
 }
 
 export async function computeAllLeadScores(): Promise<void> {
-  const contacts = await prisma.contact.findMany({
-    where: { mergedInto: null },
-    select: { id: true, updatedAt: true },
+  const activeContacts = await db.query.contacts.findMany({
+    where: isNull(contacts.mergedInto),
+    columns: { id: true, updatedAt: true },
   });
 
-  let updated = 0;
+  let updatedCount = 0;
   const now = new Date();
 
-  for (const contact of contacts) {
+  for (const contact of activeContacts) {
     const score = await computeLeadScore(contact.id);
 
-    // Determine lastActivity for auto-tagger (reuse same logic briefly)
-    const conversations = await prisma.conversation.findMany({
-      where: { contactId: contact.id },
-      select: { id: true },
+    // Determine lastActivity for auto-tagger
+    const contactConvs = await db.query.conversations.findMany({
+      where: eq(conversations.contactId, contact.id),
+      columns: { id: true },
     });
-    const convIds = conversations.map((c) => c.id);
-    const latestMsg = convIds.length
-      ? await prisma.message.findFirst({
-          where: { conversationId: { in: convIds } },
-          orderBy: { sentAt: 'desc' },
-          select: { sentAt: true },
-        })
-      : null;
-    const latestApt = await prisma.appointment.findFirst({
-      where: { contactId: contact.id, appointmentDate: { gte: now } },
-      orderBy: { appointmentDate: 'desc' },
-      select: { appointmentDate: true },
+    const convIds = contactConvs.map((c) => c.id);
+
+    let latestMsgSentAt: Date | null = null;
+    if (convIds.length > 0) {
+      const latestMsg = await db.query.messages.findFirst({
+        where: inArray(messages.conversationId, convIds),
+        orderBy: [desc(messages.sentAt)],
+        columns: { sentAt: true },
+      });
+      if (latestMsg) latestMsgSentAt = latestMsg.sentAt;
+    }
+
+    const latestApt = await db.query.appointments.findFirst({
+      where: and(eq(appointments.contactId, contact.id), gte(appointments.appointmentDate, now)),
+      orderBy: [desc(appointments.appointmentDate)],
+      columns: { appointmentDate: true },
     });
-    const candidates: Date[] = [contact.updatedAt];
-    if (latestMsg) candidates.push(latestMsg.sentAt);
+
+    const candidates: Date[] = [contact.updatedAt ?? now];
+    if (latestMsgSentAt) candidates.push(latestMsgSentAt);
     if (latestApt) candidates.push(latestApt.appointmentDate);
     const lastActivity = new Date(Math.max(...candidates.map((d) => d.getTime())));
 
     const tags = await applyAutoTags(contact.id, score, lastActivity);
 
-    await prisma.contact.update({
-      where: { id: contact.id },
-      data: { leadScore: score, lastActivity, tags },
-    });
+    await db.update(contacts)
+      .set({ leadScore: score, lastActivity, tags, updatedAt: new Date() })
+      .where(eq(contacts.id, contact.id));
 
-    updated++;
+    updatedCount++;
   }
 
-  logger.info(`[lead-scoring] Updated scores for ${updated} contact(s)`);
+  logger.info(`[lead-scoring] Updated scores for ${updatedCount} contact(s)`);
 }

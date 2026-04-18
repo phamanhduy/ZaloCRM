@@ -3,7 +3,9 @@
  * All routes require JWT auth, scoped to user's orgId.
  */
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { db } from '../../shared/database/db.js';
+import { savedReports } from '../../shared/database/schema.js';
+import { eq, and, desc } from 'drizzle-orm';
 import { authMiddleware } from '../auth/auth-middleware.js';
 import { logger } from '../../shared/utils/logger.js';
 import {
@@ -13,6 +15,7 @@ import {
   executeCustomReport,
 } from './analytics-service.js';
 import type { ReportConfig } from './analytics-service.js';
+import { v4 as uuidv4 } from 'uuid';
 
 export async function savedReportRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', authMiddleware);
@@ -21,11 +24,11 @@ export async function savedReportRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/v1/saved-reports', async (request: FastifyRequest, reply: FastifyReply) => {
     try {
       const { orgId } = request.user!;
-      const reports = await prisma.savedReport.findMany({
-        where: { orgId },
-        orderBy: { createdAt: 'desc' },
+      const list = await db.query.savedReports.findMany({
+        where: eq(savedReports.orgId, orgId),
+        orderBy: [desc(savedReports.createdAt)],
       });
-      return { data: reports };
+      return { data: list };
     } catch (err) {
       logger.error('[saved-reports] List error:', err);
       return reply.status(500).send({ error: 'Failed to list saved reports' });
@@ -40,15 +43,18 @@ export async function savedReportRoutes(app: FastifyInstance): Promise<void> {
       if (!body.name || !body.type) {
         return reply.status(400).send({ error: 'name and type are required' });
       }
-      const report = await prisma.savedReport.create({
-        data: {
-          orgId,
-          name: body.name,
-          type: body.type,
-          config: body.config ?? {},
-          createdBy: userId,
-        },
+
+      const id = uuidv4();
+      await db.insert(savedReports).values({
+        id,
+        orgId,
+        name: body.name,
+        type: body.type,
+        config: body.config ?? {},
+        createdBy: userId,
       });
+
+      const report = await db.query.savedReports.findFirst({ where: eq(savedReports.id, id) });
       return reply.status(201).send(report);
     } catch (err) {
       logger.error('[saved-reports] Create error:', err);
@@ -61,7 +67,9 @@ export async function savedReportRoutes(app: FastifyInstance): Promise<void> {
     try {
       const { orgId } = request.user!;
       const { id } = request.params as { id: string };
-      const report = await prisma.savedReport.findFirst({ where: { id, orgId } });
+      const report = await db.query.savedReports.findFirst({ 
+        where: and(eq(savedReports.id, id), eq(savedReports.orgId, orgId)) 
+      });
       if (!report) return reply.status(404).send({ error: 'Report not found' });
       return report;
     } catch (err) {
@@ -76,12 +84,21 @@ export async function savedReportRoutes(app: FastifyInstance): Promise<void> {
       const { orgId } = request.user!;
       const { id } = request.params as { id: string };
       const body = request.body as { name?: string; config?: any };
-      const existing = await prisma.savedReport.findFirst({ where: { id, orgId } });
-      if (!existing) return reply.status(404).send({ error: 'Report not found' });
-      const updated = await prisma.savedReport.update({
-        where: { id },
-        data: { name: body.name ?? existing.name, config: body.config ?? existing.config },
+
+      const existing = await db.query.savedReports.findFirst({ 
+        where: and(eq(savedReports.id, id), eq(savedReports.orgId, orgId)) 
       });
+      if (!existing) return reply.status(404).send({ error: 'Report not found' });
+
+      await db.update(savedReports)
+        .set({ 
+          name: body.name ?? existing.name, 
+          config: body.config ?? existing.config,
+          updatedAt: new Date()
+        })
+        .where(eq(savedReports.id, id));
+
+      const updated = await db.query.savedReports.findFirst({ where: eq(savedReports.id, id) });
       return updated;
     } catch (err) {
       logger.error('[saved-reports] Update error:', err);
@@ -94,9 +111,13 @@ export async function savedReportRoutes(app: FastifyInstance): Promise<void> {
     try {
       const { orgId } = request.user!;
       const { id } = request.params as { id: string };
-      const existing = await prisma.savedReport.findFirst({ where: { id, orgId } });
+
+      const existing = await db.query.savedReports.findFirst({ 
+        where: and(eq(savedReports.id, id), eq(savedReports.orgId, orgId)) 
+      });
       if (!existing) return reply.status(404).send({ error: 'Report not found' });
-      await prisma.savedReport.delete({ where: { id } });
+      
+      await db.delete(savedReports).where(eq(savedReports.id, id));
       return { success: true };
     } catch (err) {
       logger.error('[saved-reports] Delete error:', err);
@@ -109,12 +130,14 @@ export async function savedReportRoutes(app: FastifyInstance): Promise<void> {
     try {
       const { orgId } = request.user!;
       const { id } = request.params as { id: string };
-      const report = await prisma.savedReport.findFirst({ where: { id, orgId } });
+      const report = await db.query.savedReports.findFirst({ 
+        where: and(eq(savedReports.id, id), eq(savedReports.orgId, orgId)) 
+      });
       if (!report) return reply.status(404).send({ error: 'Report not found' });
 
-      const config = report.config as any;
-      const from = config.dateRange?.from ?? new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
-      const to = config.dateRange?.to ?? new Date().toISOString().split('T')[0];
+      const configData = report.config as any;
+      const from = configData.dateRange?.from ?? new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
+      const to = configData.dateRange?.to ?? new Date().toISOString().split('T')[0];
 
       switch (report.type) {
         case 'conversion_funnel':
@@ -124,7 +147,7 @@ export async function savedReportRoutes(app: FastifyInstance): Promise<void> {
         case 'response_time':
           return await getResponseTimeAnalysis(orgId, from, to);
         case 'custom':
-          return await executeCustomReport(orgId, config as ReportConfig);
+          return await executeCustomReport(orgId, configData as ReportConfig);
         default:
           return reply.status(400).send({ error: `Unknown report type: ${report.type}` });
       }
