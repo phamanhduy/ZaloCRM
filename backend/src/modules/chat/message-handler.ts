@@ -22,6 +22,8 @@ export interface IncomingMessage {
   threadId: string;         // For user: contact UID. For group: group ID
   threadType: 'user' | 'group'; // user or group conversation
   groupName?: string;       // group name if group message
+  avatarUrl?: string;       // sender avatar
+  groupAvatar?: string;     // group avatar if group
   attachments?: any[];
 }
 
@@ -64,6 +66,7 @@ export async function handleIncomingMessage(
       senderType: msg.isSelf ? 'self' : 'contact',
       senderUid: msg.senderUid,
       senderName: msg.senderName || null,
+      senderAvatar: msg.avatarUrl || null,
       content: msg.content || '',
       contentType: msg.contentType || 'text',
       attachments: msg.attachments ?? [],
@@ -159,6 +162,7 @@ async function upsertContact(msg: IncomingMessage, orgId: string): Promise<strin
         orgId,
         zaloUid: groupUid,
         fullName: msg.groupName || 'Nhóm',
+        avatarUrl: msg.groupAvatar || null,
         metadata: { isGroup: true },
       });
       groupContact = { id, fullName: msg.groupName || 'Nhóm' };
@@ -166,7 +170,10 @@ async function upsertContact(msg: IncomingMessage, orgId: string): Promise<strin
       emitWebhook(orgId, 'contact.created', { contactId: groupContact.id, fullName: groupContact.fullName });
     } else if (msg.groupName && groupContact.fullName !== msg.groupName) {
       await db.update(contacts)
-        .set({ fullName: msg.groupName })
+        .set({ 
+          fullName: msg.groupName,
+          ...(msg.groupAvatar ? { avatarUrl: msg.groupAvatar } : {})
+        })
         .where(eq(contacts.id, groupContact.id));
     }
     return groupContact.id;
@@ -187,13 +194,17 @@ async function upsertContact(msg: IncomingMessage, orgId: string): Promise<strin
       orgId,
       zaloUid: msg.senderUid,
       fullName: msg.senderName || 'Unknown',
+      avatarUrl: msg.avatarUrl || null,
     });
     contact = { id, fullName: msg.senderName || 'Unknown' };
     // Emit webhook for new contact created
     emitWebhook(orgId, 'contact.created', { contactId: contact.id, fullName: contact.fullName });
   } else if (msg.senderName && contact.fullName !== msg.senderName) {
     await db.update(contacts)
-      .set({ fullName: msg.senderName })
+      .set({ 
+        fullName: msg.senderName,
+        ...(msg.avatarUrl ? { avatarUrl: msg.avatarUrl } : {})
+      })
       .where(eq(contacts.id, contact.id));
   }
 

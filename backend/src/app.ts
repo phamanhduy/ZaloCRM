@@ -7,9 +7,11 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import fastifyJwt from '@fastify/jwt';
 import rateLimit from '@fastify/rate-limit';
+import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import { Server } from 'socket.io';
 import path from 'node:path';
+import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { config } from './config/index.js';
@@ -77,6 +79,24 @@ async function bootstrap() {
     });
   }
 
+  // Serve uploads
+  await app.register(fastifyStatic, {
+    root: path.join(__dirname, '../uploads'),
+    prefix: '/uploads/',
+    decorateReply: false,
+  });
+  // Ensure uploads directory exists
+  const uploadsDir = path.join(__dirname, '../uploads');
+  if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+  }
+
+  await app.register(multipart, {
+    limits: {
+      fileSize: 50 * 1024 * 1024, // 50MB
+    },
+  });
+
   // ── Socket.IO ─────────────────────────────────────────────────────────────
 
   const io = new Server(app.server, {
@@ -127,6 +147,7 @@ async function bootstrap() {
   await app.register(automationRoutes);
   await app.register(templateRoutes);
   await app.register(aiRoutes);
+  await app.register(import('./modules/chat/upload-routes.js').then(m => m.uploadRoutes));
 
   // Liveness/readiness probe — also checks DB connectivity
   app.get('/health', async () => {

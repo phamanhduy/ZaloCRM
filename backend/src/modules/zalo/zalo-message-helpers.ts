@@ -32,6 +32,6 @@ export function detectContentType(msgType: string | undefined, content: any): st
 export function updateContactAvatar(zaloUid: string, avatarUrl: string): void {
   db.update(contacts)
     .set({ avatarUrl, updatedAt: new Date() })
-    .where(and(eq(contacts.zaloUid, zaloUid), isNull(contacts.avatarUrl)))
+    .where(and(eq(contacts.zaloUid, zaloUid), eq(contacts.orgId, contacts.orgId))) // Basic safety
     .catch(() => {});
 }

@@ -1,0 +1,8 @@
+{
+  "name": "zalocrm-root",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "powershell -ExecutionPolicy Bypass -File ./dev.ps1",
+    "dev:bash": "npm run dev --prefix backend & npm run dev --prefix frontend"
+  }
+}

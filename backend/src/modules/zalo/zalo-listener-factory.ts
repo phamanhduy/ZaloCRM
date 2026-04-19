@@ -54,15 +54,15 @@ async function resolveZaloName(
   return { zaloName: '', avatar: '' };
 }
 
-// Fetch group display name from the zca-js API
-async function resolveGroupName(api: any, groupId: string): Promise<string> {
+// Fetch group info from the zca-js API
+async function resolveGroupInfo(api: any, groupId: string): Promise<{ name: string; avatar: string }> {
   try {
     const result = await api.getGroupInfo(groupId);
     const info = result?.gridInfoMap?.[groupId];
-    return info?.name || '';
+    return { name: info?.name || '', avatar: info?.avatar || '' };
   } catch (err) {
     logger.warn(`[zalo] getGroupInfo failed for ${groupId}:`, err);
-    return '';
+    return { name: '', avatar: '' };
   }
 }
 
@@ -100,16 +100,26 @@ export function attachZaloListener(ctx: ListenerContext): void {
         if (userInfo.avatar) updateContactAvatar(senderUid, userInfo.avatar);
       }
 
-      // Resolve group name for group threads
+      // Resolve group info for group threads
       let groupName: string | undefined;
       if (isGroup && message.threadId) {
-        groupName = await resolveGroupName(api, message.threadId);
+        const groupInfo = await resolveGroupInfo(api, message.threadId);
+        groupName = groupInfo.name;
+        if (groupInfo.avatar) updateContactAvatar(message.threadId, groupInfo.avatar);
       }
 
       const rawContent = message.data?.content;
       const content =
         typeof rawContent === 'string' ? rawContent : JSON.stringify(rawContent || '');
       const contentType = detectContentType(message.data?.msgType, rawContent);
+
+      const groupInfo = isGroup && message.threadId ? await resolveGroupInfo(api, message.threadId) : null;
+      let senderAvatar = '';
+      if (!message.isSelf && senderUid) {
+        const userInfo = await resolveZaloName(api, senderUid, userInfoCache);
+        if (userInfo.zaloName) senderName = userInfo.zaloName;
+        senderAvatar = userInfo.avatar;
+      }
 
       const result = await handleIncomingMessage({
         accountId,
@@ -122,7 +132,9 @@ export function attachZaloListener(ctx: ListenerContext): void {
         isSelf: message.isSelf || false,
         threadId: message.threadId || '',
         threadType: isGroup ? 'group' : 'user',
-        groupName,
+        groupName: groupInfo?.name,
+        avatarUrl: senderAvatar,
+        groupAvatar: groupInfo?.avatar,
         attachments: [],
       });
 

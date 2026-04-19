@@ -5,14 +5,17 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { db } from '../../shared/database/db.js';
 import { conversations, messages, contacts, zaloAccounts, zaloAccountAccess } from '../../shared/database/schema.js';
-import { eq, and, or, like, desc, count, inArray } from 'drizzle-orm';
+import { eq, and, or, like, desc, count, inArray, gt } from 'drizzle-orm';
 import { authMiddleware } from '../auth/auth-middleware.js';
 import { requireZaloAccess } from '../zalo/zalo-access-middleware.js';
+import { v4 as uuidv4 } from 'uuid';
 import { zaloPool } from '../zalo/zalo-pool.js';
 import { zaloRateLimiter } from '../zalo/zalo-rate-limiter.js';
 import { logger } from '../../shared/utils/logger.js';
-import { v4 as uuidv4 } from 'uuid';
 import type { Server } from 'socket.io';
+import fs from 'fs';
+import path from 'path';
+import sizeOf from 'image-size';
 
 type QueryParams = Record<string, string>;
 
@@ -22,31 +25,39 @@ export async function chatRoutes(app: FastifyInstance) {
   // ── List conversations (paginated) ──────────────────────────────────────
   app.get('/api/v1/conversations', async (request: FastifyRequest, reply: FastifyReply) => {
     const user = request.user!;
-    const { page = '1', limit = '50', search = '', accountId = '' } = request.query as QueryParams;
+    const { page = '1', limit = '50', search = '', accountId = '', unread = '', status = '' } = request.query as any;
 
     let filters = eq(conversations.orgId, user.orgId);
-    
-    if (accountId) {
+
+    if (accountId && accountId !== '') {
       filters = and(filters, eq(conversations.zaloAccountId, accountId)) as any;
     }
-    
-    if (search) {
-      // Find contacts first since SQLite doesn't support easy joining with filtering on the join in findMany with 'with'
+
+    if (unread === 'true' || unread === true) {
+      filters = and(filters, gt(conversations.unreadCount, 0)) as any;
+    }
+
+    const hasSearch = search && search.trim() !== '';
+    const hasStatus = status && status.trim() !== '';
+
+    if (hasSearch || hasStatus) {
+      const contactFilters = [eq(contacts.orgId, user.orgId)];
+      if (hasSearch) {
+        contactFilters.push(or(like(contacts.fullName, `%${search}%`), like(contacts.phone, `%${search}%`)) as any);
+      }
+      if (hasStatus) {
+        contactFilters.push(eq(contacts.status, status) as any);
+      }
+
       const matchedContacts = await db.query.contacts.findMany({
-        where: and(
-          eq(contacts.orgId, user.orgId),
-          or(
-            like(contacts.fullName, `%${search}%`),
-            like(contacts.phone, `%${search}%`)
-          )
-        ),
+        where: and(...contactFilters),
         columns: { id: true }
       });
+
       const contactIds = matchedContacts.map(c => c.id);
       if (contactIds.length > 0) {
         filters = and(filters, inArray(conversations.contactId, contactIds)) as any;
       } else {
-        // No match found
         return { conversations: [], total: 0, page: parseInt(page), limit: parseInt(limit) };
       }
     }
@@ -72,9 +83,7 @@ export async function chatRoutes(app: FastifyInstance) {
       db.query.conversations.findMany({
         where: filters,
         with: {
-          contact: {
-            columns: { id: true, fullName: true, phone: true, avatarUrl: true, zaloUid: true }
-          },
+          contact: true,
           zaloAccount: {
             columns: { id: true, displayName: true, zaloUid: true }
           },
@@ -91,11 +100,11 @@ export async function chatRoutes(app: FastifyInstance) {
       db.select({ value: count() }).from(conversations).where(filters),
     ]);
 
-    return { 
-      conversations: convs, 
-      total: totalResult[0].value, 
-      page: pageNum, 
-      limit: limitNum 
+    return {
+      conversations: convs,
+      total: totalResult[0].value,
+      page: pageNum,
+      limit: limitNum
     };
   });
 
@@ -143,11 +152,11 @@ export async function chatRoutes(app: FastifyInstance) {
       db.select({ value: count() }).from(messages).where(eq(messages.conversationId, id)),
     ]);
 
-    return { 
-      messages: msgs.reverse(), 
-      total: totalResult[0].value, 
-      page: pageNum, 
-      limit: limitNum 
+    return {
+      messages: msgs.reverse(),
+      total: totalResult[0].value,
+      page: pageNum,
+      limit: limitNum
     };
   });
 
@@ -155,9 +164,15 @@ export async function chatRoutes(app: FastifyInstance) {
   app.post('/api/v1/conversations/:id/messages', { preHandler: requireZaloAccess('chat') }, async (request: FastifyRequest, reply: FastifyReply) => {
     const user = request.user!;
     const { id } = request.params as { id: string };
-    const { content } = request.body as { content: string };
+    const { content, contentType = 'text', attachments = [] } = request.body as {
+      content: string;
+      contentType?: string;
+      attachments?: any[]; // Array of { path, fileName, type }
+    };
 
-    if (!content?.trim()) return reply.status(400).send({ error: 'Content required' });
+    if (!content?.trim() && (!attachments || attachments.length === 0)) {
+      return reply.status(400).send({ error: 'Content or attachments required' });
+    }
 
     const conversation = await db.query.conversations.findFirst({
       where: and(eq(conversations.id, id), eq(conversations.orgId, user.orgId)),
@@ -168,7 +183,7 @@ export async function chatRoutes(app: FastifyInstance) {
     const instance = zaloPool.getInstance(conversation.zaloAccountId);
     if (!instance?.api) return reply.status(400).send({ error: 'Zalo account not connected' });
 
-    // Rate limit check — prevent account blocking
+    // Rate limit check
     const limits = zaloRateLimiter.checkLimits(conversation.zaloAccountId);
     if (!limits.allowed) {
       return reply.status(429).send({ error: limits.reason });
@@ -176,11 +191,43 @@ export async function chatRoutes(app: FastifyInstance) {
 
     try {
       const threadId = conversation.externalThreadId || '';
-      // zca-js sendMessage(message, threadId, type) — type: 0=User, 1=Group
       const threadType = conversation.threadType === 'group' ? 1 : 0;
 
       zaloRateLimiter.recordSend(conversation.zaloAccountId);
-      await instance.api.sendMessage({ msg: content }, threadId, threadType);
+
+      // Prepare message for zca-js
+      const msgData: any = { msg: content || '' };
+      if (attachments && attachments.length > 0) {
+        msgData.attachments = await Promise.all(attachments.map(async (a: any) => {
+          const buffer = fs.readFileSync(a.path);
+          const baseName = path.basename(a.path);
+
+          const meta: any = { totalSize: buffer.length };
+          if (a.type?.includes('image') || contentType === 'image') {
+            try {
+              const size = sizeOf(buffer);
+              meta.width = size.width;
+              meta.height = size.height;
+            } catch (err) {
+              logger.warn('[chat] Failed to get image size from buffer:', err);
+            }
+          }
+
+          return {
+            data: buffer,
+            filename: baseName,
+            metadata: meta
+          };
+        }));
+        logger.info('[chat] Sending with attachments (buffers):', attachments.length);
+      }
+
+      try {
+        await instance.api.sendMessage(msgData, threadId, threadType);
+      } catch (zcaErr: any) {
+        logger.error('[chat] zca-js sendMessage error:', zcaErr.message);
+        throw new Error(`Zalo API error: ${zcaErr.message}`);
+      }
 
       const msgId = uuidv4();
       await db.insert(messages).values({
@@ -188,9 +235,11 @@ export async function chatRoutes(app: FastifyInstance) {
         conversationId: id,
         senderType: 'self',
         senderUid: conversation.zaloAccount.zaloUid || '',
-        senderName: 'Staff',
-        content,
-        contentType: 'text',
+        senderName: conversation.zaloAccount.displayName || 'Nhân viên',
+        senderAvatar: conversation.zaloAccount.avatarUrl || null,
+        content: content || '',
+        contentType: contentType,
+        attachments: attachments,
         sentAt: new Date(),
         repliedByUserId: user.id,
       });
@@ -200,10 +249,10 @@ export async function chatRoutes(app: FastifyInstance) {
       });
 
       await db.update(conversations)
-        .set({ 
-          lastMessageAt: new Date(), 
-          isReplied: true, 
-          unreadCount: 0 
+        .set({
+          lastMessageAt: new Date(),
+          isReplied: true,
+          unreadCount: 0
         })
         .where(eq(conversations.id, id));
 
@@ -211,9 +260,9 @@ export async function chatRoutes(app: FastifyInstance) {
       io?.emit('chat:message', { accountId: conversation.zaloAccountId, message, conversationId: id });
 
       return message;
-    } catch (err) {
-      logger.error('[chat] Send message error:', err);
-      return reply.status(500).send({ error: 'Failed to send message' });
+    } catch (err: any) {
+      logger.error('[chat] Send message error details:', err);
+      return reply.status(500).send({ error: err.message || 'Failed to send message' });
     }
   });
 

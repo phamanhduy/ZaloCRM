@@ -104,12 +104,18 @@ router.beforeEach(async (to, _from, next) => {
   // Check auth for protected routes
   if (to.meta.requiresAuth) {
     if (!authStore.token) {
+      console.log('Router: No token, redirecting to login');
       return next('/login');
     }
-    // Fetch profile if not loaded yet
+    
+    // Fetch profile only if NOT already loaded to prevent infinite loops or redundant calls
     if (!authStore.user) {
-      await authStore.init();
-      if (!authStore.isAuthenticated) {
+      console.log('Router: Fetching profile...');
+      try {
+        await authStore.init();
+        console.log('Router: Auth init successful');
+      } catch (err) {
+        console.error('Router: Auth init failed', err);
         return next('/login');
       }
     }

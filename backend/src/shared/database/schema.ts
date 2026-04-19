@@ -207,6 +207,7 @@ export const messages = sqliteTable('messages', {
   senderType: text('sender_type').notNull(),
   senderUid: text('sender_uid'),
   senderName: text('sender_name'),
+  senderAvatar: text('sender_avatar'),
   content: text('content'),
   contentType: text('content_type').notNull().default('text'),
   attachments: text('attachments', { mode: 'json' }).default('[]'),

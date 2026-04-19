@@ -14,11 +14,12 @@ import { eq } from 'drizzle-orm';
 import { logger } from '../../shared/utils/logger.js';
 import { attachZaloListener, type UserInfoCacheEntry } from './zalo-listener-factory.js';
 import { emitWebhook } from '../api/webhook-service.js';
+import sizeOf from 'image-size';
 
 // zca-js has no reliable ESM type exports — load via CJS interop
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import * as ZcaPackage from 'zca-js';
-const { Zalo } = ZcaPackage as unknown as { Zalo: new (opts: { logging: boolean }) => any };
+const { Zalo } = ZcaPackage as unknown as { Zalo: new (opts: any) => any };
 
 interface ZaloCredentials {
   cookie: any;
@@ -49,7 +50,13 @@ class ZaloAccountPool {
 
   // Initiate QR-based login; emits QR events to frontend via Socket.IO
   async loginQR(accountId: string): Promise<void> {
-    const zalo = new Zalo({ logging: false });
+    const zalo = new Zalo({ 
+      logging: false,
+      imageMetadataGetter: (imagePath: string) => {
+        const size = sizeOf(imagePath);
+        return { width: size.width, height: size.height };
+      }
+    });
     this.instances.set(accountId, { zalo, api: null, status: 'qr_pending', lastActivity: new Date() });
 
     try {
@@ -123,7 +130,13 @@ class ZaloAccountPool {
 
   // Reconnect using previously saved session credentials
   async reconnect(accountId: string, credentials: ZaloCredentials): Promise<void> {
-    const zalo = new Zalo({ logging: false });
+    const zalo = new Zalo({ 
+      logging: false,
+      imageMetadataGetter: (imagePath: string) => {
+        const size = sizeOf(imagePath);
+        return { width: size.width, height: size.height };
+      }
+    });
     this.instances.set(accountId, { zalo, api: null, status: 'connecting', lastActivity: new Date() });
 
     try {
