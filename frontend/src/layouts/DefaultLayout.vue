@@ -185,13 +185,13 @@
 
                 <div class="flex-grow-1 overflow-hidden">
                   <div class="d-flex align-center justify-space-between">
-                    <span class="text-subtitle-2 font-weight-bold text-truncate" style="max-width: 150px; color: var(--z-text-primary);">
+                    <span class="text-subtitle-2 font-weight-bold text-truncate" style="max-width: 180px; color: var(--z-text-primary);">
                       {{ conv.contact?.fullName || 'Người dùng Zalo' }}
                     </span>
                     <span class="text-tiny" style="color: var(--z-text-secondary); font-weight: 500;">{{ formatTime(conv.lastMessageAt) }}</span>
                   </div>
                   <div class="d-flex align-center justify-space-between mt-1">
-                    <span class="text-caption text-truncate" style="max-width: 170px; color: var(--z-text-secondary);">
+                    <span class="text-caption text-truncate" style="max-width: 215px; color: var(--z-text-secondary);">
                       {{ lastMessageText(conv) }}
                     </span>
                     <v-badge
