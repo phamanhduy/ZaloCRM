@@ -298,6 +298,7 @@ const railItems = [
   { icon: 'mdi-view-dashboard-outline', path: '/', title: 'Tổng quan' },
   { icon: 'mdi-message-text-outline', path: '/chat', badge: 0, title: 'Chat' },
   { icon: 'mdi-account-group-outline', path: '/contacts', title: 'Khách hàng' },
+  { icon: 'mdi-bullhorn-outline', path: '/marketing', title: 'Marketing' },
   { icon: 'mdi-chart-bar', path: '/reports', title: 'Báo cáo' },
 ];
 

@@ -435,3 +435,48 @@ export const aiSuggestions = sqliteTable('ai_suggestions', {
   orgIdx: index('ai_suggestions_org_idx').on(table.orgId, table.createdAt),
   convIdx: index('ai_suggestions_conv_idx').on(table.conversationId, table.createdAt),
 }));
+
+// ── Marketing Campaigns ──────────────────────────────────────────────────────
+
+export const marketingCampaigns = sqliteTable('marketing_campaigns', {
+  id: text('id').primaryKey(),
+  orgId: text('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  status: text('status').notNull().default('draft'), // draft, running, paused, completed, failed
+  filters: text('filters', { mode: 'json' }).notNull().default('{}'), // { source, status, tags, zaloAccountIds }
+  messageConfig: text('message_config', { mode: 'json' }).notNull().default('{}'), // { text, attachments: [] }
+  stats: text('stats', { mode: 'json' }).notNull().default('{"total": 0, "sent": 0, "error": 0}'),
+  lastRunAt: integer('last_run_at', { mode: 'timestamp_ms' }),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).default(sql`(strftime('%s', 'now') * 1000)`),
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).default(sql`0`),
+});
+
+export const marketingCampaignsRelations = relations(marketingCampaigns, ({ one, many }) => ({
+  org: one(organizations, {
+    fields: [marketingCampaigns.orgId],
+    references: [organizations.id],
+  }),
+  logs: many(marketingLogs),
+}));
+
+export const marketingLogs = sqliteTable('marketing_logs', {
+  id: text('id').primaryKey(),
+  campaignId: text('campaign_id').notNull().references(() => marketingCampaigns.id, { onDelete: 'cascade' }),
+  contactId: text('contact_id').notNull().references(() => contacts.id, { onDelete: 'cascade' }),
+  zaloAccountId: text('zalo_account_id').notNull(),
+  status: text('status').notNull(), // pending, sent, failed
+  errorMessage: text('error_message'),
+  sentAt: integer('sent_at', { mode: 'timestamp_ms' }),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).default(sql`(strftime('%s', 'now') * 1000)`),
+});
+
+export const marketingLogsRelations = relations(marketingLogs, ({ one }) => ({
+  campaign: one(marketingCampaigns, {
+    fields: [marketingLogs.campaignId],
+    references: [marketingCampaigns.id],
+  }),
+  contact: one(contacts, {
+    fields: [marketingLogs.contactId],
+    references: [contacts.id],
+  }),
+}));

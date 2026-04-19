@@ -148,6 +148,7 @@ async function bootstrap() {
   await app.register(templateRoutes);
   await app.register(aiRoutes);
   await app.register(import('./modules/chat/upload-routes.js').then(m => m.uploadRoutes));
+  await app.register(import('./modules/marketing/marketing-routes.js').then(m => m.marketingRoutes));
 
   // Liveness/readiness probe — also checks DB connectivity
   app.get('/health', async () => {

@@ -42,6 +42,26 @@
           density="compact" variant="solo-filled" flat class="mb-3" hide-details />
         <v-select v-model="form.source" label="Nguồn" :items="SOURCE_OPTIONS" item-title="text" item-value="value"
           density="compact" variant="solo-filled" flat class="mb-3" hide-details />
+        
+        <div class="text-caption font-weight-bold mb-1 opacity-50 mt-4">NHÃN (TAGS)</div>
+        <v-combobox
+          v-model="form.tags"
+          multiple
+          chips
+          closable-chips
+          placeholder="Nhập và nhấn Enter để thêm tag"
+          density="compact"
+          variant="solo-filled"
+          flat
+          hide-details
+          class="mb-3"
+        >
+          <template #selection="{ item, index }">
+            <v-chip size="x-small" closable @click:close="form.tags.splice(index, 1)">
+              {{ item.title }}
+            </v-chip>
+          </template>
+        </v-combobox>
 
         <div class="text-caption font-weight-bold mb-1 opacity-50 mt-4">GHI CHÚ</div>
         <v-textarea v-model="form.notes" placeholder="Nhập ghi chú khách hàng..." rows="3" auto-grow
