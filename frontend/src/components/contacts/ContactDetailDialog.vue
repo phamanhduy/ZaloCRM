@@ -10,7 +10,7 @@
       <v-divider />
 
       <v-card-text>
-        <v-row dense>
+        <v-row density="comfortable">
           <!-- Full name -->
           <v-col cols="12" sm="6">
             <v-text-field v-model="form.fullName" label="Họ và tên" :rules="[required]" />

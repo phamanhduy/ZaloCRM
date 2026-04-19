@@ -110,7 +110,7 @@
         </v-card-title>
         <v-divider />
         <v-card-text>
-          <v-row dense>
+          <v-row density="comfortable">
             <v-col cols="12">
               <v-text-field
                 v-model="createForm.contactId"

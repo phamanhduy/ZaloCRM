@@ -35,8 +35,11 @@ const statusLabels: Record<string, string> = {
   lost: 'Mất',
 };
 
-function getCount(item: { _count: { _all: number } | number }): number {
-  return typeof item._count === 'number' ? item._count : item._count._all;
+function getCount(item: any): number {
+  // Robust count extractor to prevent TypeError in dashboard charts
+  const countObj = item && item["_count"];
+  if (!countObj) return 0;
+  return typeof countObj === 'number' ? countObj : (countObj["_all"] || 0);
 }
 
 const chartData = computed(() => {

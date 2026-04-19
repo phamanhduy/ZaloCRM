@@ -50,10 +50,10 @@ export function useDashboard() {
         api.get('/dashboard/appointments'),
       ]);
       kpi.value = kpiRes.data;
-      messageVolume.value = volRes.data.data || volRes.data;
-      pipeline.value = pipRes.data;
-      sources.value = srcRes.data;
-      appointments.value = aptRes.data;
+      messageVolume.value = volRes.data.data || volRes.data || [];
+      pipeline.value = pipRes.data.data || pipRes.data || [];
+      sources.value = srcRes.data.data || srcRes.data || [];
+      appointments.value = aptRes.data.data || aptRes.data || [];
     } catch (err) {
       console.error('Dashboard fetch error:', err);
     } finally {

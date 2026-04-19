@@ -1,5 +1,5 @@
 <template>
-  <v-row dense class="mb-2 align-center">
+  <v-row density="comfortable" class="mb-2 align-center">
     <!-- Search -->
     <v-col cols="12" sm="4">
       <v-text-field
