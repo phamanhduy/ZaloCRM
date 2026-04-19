@@ -1,7 +1,7 @@
 <template>
   <div
     class="chat-contact-panel d-flex flex-column h-100"
-    style="background-color: var(--z-main-bg); overflow-y: auto;"
+    style="background-color: var(--z-main-bg); overflow-y: auto; border-left: 1px solid #dbdbdb;"
   >
     <!-- Header -->
     <div class="pa-4 d-flex align-center border-b" style="height: 64px;">
