@@ -44,6 +44,18 @@ export async function handleIncomingMessage(
     });
     if (!account) return null;
 
+    // Deduplicate: If we already have this Zalo message ID, don't save it again
+    if (msg.msgId) {
+      const normalizedId = String(msg.msgId);
+      const existing = await db.query.messages.findFirst({
+        where: eq(messages.zaloMsgId, normalizedId),
+      });
+      if (existing) {
+        logger.info(`[message-handler] Skipping duplicate message (ZaloID: ${normalizedId})`);
+        return null; 
+      }
+    }
+
     const contactId = await upsertContact(msg, account.orgId);
 
     // Update lastActivity for lead scoring freshness

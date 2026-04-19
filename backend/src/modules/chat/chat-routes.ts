@@ -5,7 +5,7 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { db } from '../../shared/database/db.js';
 import { conversations, messages, contacts, zaloAccounts, zaloAccountAccess } from '../../shared/database/schema.js';
-import { eq, and, or, like, desc, count, inArray, gt } from 'drizzle-orm';
+import { eq, and, or, like, desc, count, inArray, gt, sql } from 'drizzle-orm';
 import { authMiddleware } from '../auth/auth-middleware.js';
 import { requireZaloAccess } from '../zalo/zalo-access-middleware.js';
 import { v4 as uuidv4 } from 'uuid';
@@ -222,6 +222,9 @@ export async function chatRoutes(app: FastifyInstance) {
         logger.info('[chat] Sending with attachments (buffers):', attachments.length);
       }
 
+      const cliMsgId = String(Date.now());
+      msgData.cliMsgId = cliMsgId;
+
       try {
         await instance.api.sendMessage(msgData, threadId, threadType);
       } catch (zcaErr: any) {
@@ -229,36 +232,19 @@ export async function chatRoutes(app: FastifyInstance) {
         throw new Error(`Zalo API error: ${zcaErr.message}`);
       }
 
-      const msgId = uuidv4();
-      await db.insert(messages).values({
-        id: msgId,
-        conversationId: id,
-        senderType: 'self',
-        senderUid: conversation.zaloAccount.zaloUid || '',
-        senderName: conversation.zaloAccount.displayName || 'Nhân viên',
-        senderAvatar: conversation.zaloAccount.avatarUrl || null,
-        content: content || '',
-        contentType: contentType,
-        attachments: attachments,
-        sentAt: new Date(),
-        repliedByUserId: user.id,
-      });
+      logger.info(`[chat] Message sent. Waiting for sync event (cliMsgId: ${cliMsgId})`);
+
+      // Wait a bit for the listener to process and insert
+      await new Promise(resolve => setTimeout(resolve, 500));
 
       const message = await db.query.messages.findFirst({
-        where: eq(messages.id, msgId)
+        where: eq(messages.conversationId, id),
+        orderBy: [sql`${messages.sentAt} DESC`],
       });
 
-      await db.update(conversations)
-        .set({
-          lastMessageAt: new Date(),
-          isReplied: true,
-          unreadCount: 0
-        })
-        .where(eq(conversations.id, id));
-
       const io = (app as any).io as Server;
-      io?.emit('chat:message', { accountId: conversation.zaloAccountId, message, conversationId: id });
-
+      // We don't emit here anymore because the listener already did
+      
       return message;
     } catch (err: any) {
       logger.error('[chat] Send message error details:', err);
