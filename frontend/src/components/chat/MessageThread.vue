@@ -11,10 +11,13 @@
     <template v-else>
       <!-- Header -->
       <div class="chat-header px-4 d-flex align-center flex-shrink-0">
-        <v-avatar size="40" class="mr-3">
-          <v-icon v-if="conversation.threadType === 'group'" icon="mdi-account-group" />
-          <v-img v-else-if="conversation.contact?.avatarUrl" :src="conversation.contact.avatarUrl" />
-          <v-icon v-else icon="mdi-account" />
+        <v-avatar size="40" class="mr-3" color="#f0f2f5">
+          <v-img v-if="conversation.contact?.avatarUrl" :src="conversation.contact.avatarUrl" referrerpolicy="no-referrer">
+            <template #placeholder>
+              <v-icon :icon="conversation.threadType === 'group' ? 'mdi-account-group' : 'mdi-account'" color="grey-darken-1" />
+            </template>
+          </v-img>
+          <v-icon v-else :icon="conversation.threadType === 'group' ? 'mdi-account-group' : 'mdi-account'" color="grey-darken-1" />
         </v-avatar>
         
         <div class="flex-grow-1 overflow-hidden">

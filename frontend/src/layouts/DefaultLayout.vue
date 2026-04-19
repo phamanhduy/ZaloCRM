@@ -81,21 +81,39 @@
         >
           <!-- Chat specific content -->
           <template v-if="isChatFlow">
-            <div class="pa-4 pb-2 d-flex align-center gap-2">
-              <v-text-field
-                v-model="chatStore.searchQuery"
-                placeholder="Tìm kiếm"
-                prepend-inner-icon="mdi-magnify"
-                hide-details
-                bg-color="rgba(0,0,0,0.05)"
+            <div class="pa-4 pb-2">
+              <!-- Zalo Account Selector -->
+              <v-select
+                v-model="chatStore.accountFilter"
+                :items="[{ displayName: 'Tất cả', id: null }, ...chatStore.zaloAccounts]"
+                item-title="displayName"
+                item-value="id"
+                placeholder="Chọn tài khoản Zalo"
+                persistent-placeholder
                 density="compact"
-                variant="solo"
+                variant="solo-filled"
                 flat
-                class="z-search-field flex-grow-1"
+                hide-details
+                class="mb-2 z-account-select"
                 @update:model-value="chatStore.fetchConversations"
               />
-              <v-btn icon="mdi-account-plus-outline" variant="text" size="small" class="opacity-70" />
-              <v-btn icon="mdi-account-group-outline" variant="text" size="small" class="opacity-70" />
+
+              <div class="d-flex align-center gap-2">
+                <v-text-field
+                  v-model="chatStore.searchQuery"
+                  placeholder="Tìm kiếm"
+                  prepend-inner-icon="mdi-magnify"
+                  hide-details
+                  bg-color="rgba(0,0,0,0.05)"
+                  density="compact"
+                  variant="solo"
+                  flat
+                  class="z-search-field flex-grow-1"
+                  @update:model-value="chatStore.fetchConversations"
+                />
+                <v-btn icon="mdi-account-plus-outline" variant="text" size="small" class="opacity-70" />
+                <v-btn icon="mdi-account-group-outline" variant="text" size="small" class="opacity-70" />
+              </div>
             </div>
             
             <div class="px-4 py-1 d-flex align-center">
@@ -105,16 +123,17 @@
                 :color="(!chatStore.unreadFilter && !chatStore.statusFilter) ? 'primary' : 'grey-darken-1'"
                 @click="() => { chatStore.unreadFilter = false; chatStore.statusFilter = null; chatStore.fetchConversations(); }"
               >Tất cả</v-btn>
-              
-              <v-btn 
-                variant="text" size="small" 
-                class="px-2" 
-                :class="{ 'font-weight-bold': chatStore.unreadFilter }"
-                :color="chatStore.unreadFilter ? 'primary' : 'grey-darken-1'"
-                @click="() => { chatStore.unreadFilter = true; chatStore.statusFilter = null; chatStore.fetchConversations(); }"
-              >Chưa đọc</v-btn>
-              
+
               <v-spacer />
+              
+              <v-btn
+                v-if="chatStore.statusFilter"
+                variant="text" size="small"
+                class="px-1 text-error"
+                @click="() => { chatStore.statusFilter = null; chatStore.fetchConversations(); }"
+              >
+                Xóa lọc
+              </v-btn>
               
               <v-menu offset-y>
                 <template v-slot:activator="{ props }">
@@ -136,10 +155,6 @@
                   >
                     <v-list-item-title>{{ st.label }}</v-list-item-title>
                   </v-list-item>
-                  <v-divider v-if="chatStore.statusFilter" />
-                  <v-list-item v-if="chatStore.statusFilter" @click="() => { chatStore.statusFilter = null; chatStore.fetchConversations(); }">
-                    <v-list-item-title class="text-error">Bỏ lọc</v-list-item-title>
-                  </v-list-item>
                 </v-list>
               </v-menu>
             </div>
@@ -154,14 +169,18 @@
                 :class="{ 'conv-item-active': conv.id === chatStore.selectedConvId }"
                 @click="selectConv(conv.id)"
               >
-                <v-avatar size="48" class="mr-3 flex-shrink-0" style="border: 1px solid rgba(128, 128, 128, 0.2);">
-                  <img 
+                <v-avatar size="48" class="mr-3 flex-shrink-0" style="border: 1px solid rgba(128, 128, 128, 0.2); background-color: #f0f2f5;">
+                  <v-img 
                     v-if="conv.contact?.avatarUrl" 
                     :src="conv.contact.avatarUrl" 
                     referrerpolicy="no-referrer" 
                     style="width: 100%; height: 100%; object-fit: cover;"
-                  />
-                  <v-icon v-else icon="mdi-account" color="grey-darken-2" />
+                  >
+                    <template #placeholder>
+                      <v-icon :icon="conv.threadType === 'group' ? 'mdi-account-group' : 'mdi-account'" color="grey-darken-1" />
+                    </template>
+                  </v-img>
+                  <v-icon v-else :icon="conv.threadType === 'group' ? 'mdi-account-group' : 'mdi-account'" color="grey-darken-1" />
                 </v-avatar>
 
                 <div class="flex-grow-1 overflow-hidden">
@@ -399,6 +418,18 @@ function logout() {
 
 .sidebar-item-active {
   background: rgba(var(--v-theme-primary), 0.08);
+}
+
+.z-account-select :deep(.v-field) {
+  background-color: #f0f7ff !important;
+  border-radius: 8px !important;
+  font-size: 13px !important;
+}
+
+.z-account-select :deep(.v-field__input) {
+  min-height: 36px !important;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
 }
 
 .z-search-field :deep(.v-field__input) {

@@ -152,7 +152,7 @@ async function upsertContact(msg: IncomingMessage, orgId: string): Promise<strin
     const groupUid = msg.threadId;
     let groupContact = await db.query.contacts.findFirst({
       where: and(eq(contacts.zaloUid, groupUid), eq(contacts.orgId, orgId)),
-      columns: { id: true, fullName: true },
+      columns: { id: true, fullName: true, avatarUrl: true },
     });
 
     if (!groupContact) {
@@ -165,16 +165,22 @@ async function upsertContact(msg: IncomingMessage, orgId: string): Promise<strin
         avatarUrl: msg.groupAvatar || null,
         metadata: { isGroup: true },
       });
-      groupContact = { id, fullName: msg.groupName || 'Nhóm' };
+      groupContact = { id, fullName: msg.groupName || 'Nhóm', avatarUrl: msg.groupAvatar || null };
       // Emit webhook for new contact created
       emitWebhook(orgId, 'contact.created', { contactId: groupContact.id, fullName: groupContact.fullName });
-    } else if (msg.groupName && groupContact.fullName !== msg.groupName) {
-      await db.update(contacts)
-        .set({ 
-          fullName: msg.groupName,
-          ...(msg.groupAvatar ? { avatarUrl: msg.groupAvatar } : {})
-        })
-        .where(eq(contacts.id, groupContact.id));
+    } else {
+      // Update if name changed OR if avatar is missing but now provided
+      const nameChanged = msg.groupName && groupContact.fullName !== msg.groupName;
+      const avatarMissing = !groupContact.avatarUrl && msg.groupAvatar;
+      
+      if (nameChanged || avatarMissing) {
+        await db.update(contacts)
+          .set({ 
+            ...(nameChanged ? { fullName: msg.groupName } : {}),
+            ...(avatarMissing ? { avatarUrl: msg.groupAvatar } : {})
+          })
+          .where(eq(contacts.id, groupContact.id));
+      }
     }
     return groupContact.id;
   }
@@ -184,7 +190,7 @@ async function upsertContact(msg: IncomingMessage, orgId: string): Promise<strin
 
   let contact = await db.query.contacts.findFirst({
     where: and(eq(contacts.zaloUid, msg.senderUid), eq(contacts.orgId, orgId)),
-    columns: { id: true, fullName: true },
+    columns: { id: true, fullName: true, avatarUrl: true },
   });
 
   if (!contact) {
@@ -196,16 +202,22 @@ async function upsertContact(msg: IncomingMessage, orgId: string): Promise<strin
       fullName: msg.senderName || 'Unknown',
       avatarUrl: msg.avatarUrl || null,
     });
-    contact = { id, fullName: msg.senderName || 'Unknown' };
+    contact = { id, fullName: msg.senderName || 'Unknown', avatarUrl: msg.avatarUrl || null };
     // Emit webhook for new contact created
     emitWebhook(orgId, 'contact.created', { contactId: contact.id, fullName: contact.fullName });
-  } else if (msg.senderName && contact.fullName !== msg.senderName) {
-    await db.update(contacts)
-      .set({ 
-        fullName: msg.senderName,
-        ...(msg.avatarUrl ? { avatarUrl: msg.avatarUrl } : {})
-      })
-      .where(eq(contacts.id, contact.id));
+  } else {
+    // Update if name changed OR if avatar is missing but now provided
+    const nameChanged = msg.senderName && contact.fullName !== msg.senderName;
+    const avatarMissing = !contact.avatarUrl && msg.avatarUrl;
+
+    if (nameChanged || avatarMissing) {
+      await db.update(contacts)
+        .set({ 
+          ...(nameChanged ? { fullName: msg.senderName } : {}),
+          ...(avatarMissing ? { avatarUrl: msg.avatarUrl } : {})
+        })
+        .where(eq(contacts.id, contact.id));
+    }
   }
 
   return contact.id;
