@@ -1,8 +1,40 @@
 <template>
   <v-app>
-    <!-- Combined Navigation: Rail + Sidebar in a single drawer to prevent overlap/alignment issues -->
+    <!-- Bottom Navigation for Mobile -->
+    <v-bottom-navigation
+      v-if="mobile"
+      v-model="activeTab"
+      color="primary"
+      grow
+      class="border-t"
+    >
+      <v-btn value="/" @click="router.push('/')">
+        <v-icon>mdi-view-dashboard-outline</v-icon>
+        <span>Tổng quan</span>
+      </v-btn>
+
+      <v-btn value="/chat" @click="router.push('/chat')">
+        <v-badge v-if="unreadCount > 0" color="error" :content="unreadCount">
+          <v-icon>mdi-message-text-outline</v-icon>
+        </v-badge>
+        <v-icon v-else>mdi-message-text-outline</v-icon>
+        <span>Chat</span>
+      </v-btn>
+
+      <v-btn value="/contacts" @click="router.push('/contacts')">
+        <v-icon>mdi-account-group-outline</v-icon>
+        <span>Khách hàng</span>
+      </v-btn>
+
+      <v-btn value="/settings" @click="router.push('/zalo-accounts')">
+        <v-icon>mdi-cog-outline</v-icon>
+        <span>Cài đặt</span>
+      </v-btn>
+    </v-bottom-navigation>
+
+    <!-- Sidebar for Desktop -->
     <div
-      v-show="drawerVisible"
+      v-if="!mobile && drawerVisible"
       class="z-combined-sidebar shadow-lg"
       :style="{ 
         width: drawerWidth + 'px', 
@@ -59,7 +91,7 @@
             <div 
               class="d-flex justify-center py-3 rail-item-wrapper cursor-pointer" 
               :class="{ 'rail-item-active': isSettingsFlow }"
-              @click="router.push('/settings')"
+              @click="router.push('/zalo-accounts')"
             >
               <v-icon icon="mdi-cog-outline" :color="isSettingsFlow ? 'white' : 'rgba(255,255,255,0.7)'" size="28" />
             </div>
@@ -232,8 +264,11 @@
     <!-- Column 3: Main Content -->
     <v-main 
       class="z-main h-100 overflow-hidden" 
-      :class="{ 'pa-6': !isChatFlow }"
-      :style="{ paddingLeft: (drawerVisible ? (drawerWidth + (isChatFlow ? 0 : 24)) : 24) + 'px !important' }"
+      :class="{ 'pa-6': !isChatFlow && !mobile }"
+      :style="{ 
+        paddingLeft: (mobile ? 0 : (drawerVisible ? (drawerWidth + (isChatFlow ? 0 : 24)) : 24)) + 'px !important',
+        paddingBottom: (mobile ? 56 : 0) + 'px !important'
+      }"
     >
       <slot />
     </v-main>
@@ -242,18 +277,24 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
-import { useTheme } from 'vuetify';
+import { useTheme, useDisplay } from 'vuetify';
 import { useAuthStore } from '@/stores/auth';
 import { useChatStore, type Conversation } from '@/stores/chat';
 import { useRouter, useRoute } from 'vue-router';
 
 const theme = useTheme();
+const { mobile } = useDisplay();
 const authStore = useAuthStore();
 const chatStore = useChatStore();
 const router = useRouter();
 const route = useRoute();
 
 const drawerVisible = ref(true);
+const activeTab = ref(route.path);
+
+const unreadCount = computed(() => {
+  return chatStore.conversations.reduce((sum, conv) => sum + (conv.unreadCount || 0), 0);
+});
 
 const statuses = [
   { value: 'new', label: 'Mới' },
@@ -305,7 +346,7 @@ const railItems = [
 // Logic for Sidebar display
 const isChatFlow = computed(() => route.path.startsWith('/chat'));
 const isSettingsFlow = computed(() => {
-  const settingsPaths = ['/settings', '/zalo-accounts', '/appointments', '/integrations', '/automation'];
+  const settingsPaths = ['/settings', '/zalo-accounts', '/message-blocks', '/appointments', '/integrations', '/automation'];
   return settingsPaths.some(p => route.path === p || route.path.startsWith(p + '/'));
 });
 
@@ -316,6 +357,7 @@ const drawerWidth = computed(() => showSidebar.value ? (64 + (isChatFlow.value ?
 const sidebarItems = computed(() => {
   return [
     { title: 'Tài khoản Zalo', icon: 'mdi-cellphone-link', path: '/zalo-accounts' },
+    { title: 'Block tin nhắn', icon: 'mdi-robot-outline', path: '/message-blocks' },
     { title: 'Lịch hẹn', icon: 'mdi-calendar-clock', path: '/appointments' },
     { title: 'Tích hợp', icon: 'mdi-connection', path: '/integrations' },
     { title: 'Cài đặt', icon: 'mdi-cog', path: '/settings' },

@@ -75,14 +75,29 @@
     </v-dialog>
 
     <!-- Delete confirm dialog -->
-    <v-dialog v-model="showDeleteDialog" max-width="400">
+    <v-dialog v-model="showDeleteDialog" max-width="450">
       <v-card>
-        <v-card-title>Xác nhận xóa</v-card-title>
-        <v-card-text>Bạn có chắc muốn xóa tài khoản "{{ deleteTarget?.displayName || deleteTarget?.id }}"?</v-card-text>
-        <v-card-actions>
+        <v-card-title class="bg-error text-white pa-4">Xác nhận xóa tài khoản</v-card-title>
+        <v-card-text class="pa-6">
+            <p class="mb-4">Bạn có chắc muốn xóa tài khoản <strong>{{ deleteTarget?.displayName || deleteTarget?.id }}</strong>?</p>
+            
+            <div class="bg-grey-lighten-4 pa-4 rounded-lg">
+                <v-checkbox
+                    v-model="keepHistory"
+                    label="Giữ lại lịch sử trò chuyện (Dành cho việc kết nối lại sau này)"
+                    hide-details
+                    color="primary"
+                    density="comfortable"
+                />
+                <p class="text-caption text-grey-darken-1 mt-2 ml-8">
+                    Nếu tích chọn, các tin nhắn cũ sẽ được giữ lại. Nếu không tích, toàn bộ tin nhắn và dữ liệu liên quan sẽ bị xóa vĩnh viễn.
+                </p>
+            </div>
+        </v-card-text>
+        <v-card-actions class="pa-4">
           <v-spacer />
-          <v-btn @click="showDeleteDialog = false">Hủy</v-btn>
-          <v-btn color="error" :loading="deleting" @click="handleDeleteAccount">Xóa</v-btn>
+          <v-btn variant="text" @click="showDeleteDialog = false">Hủy</v-btn>
+          <v-btn color="error" variant="flat" :loading="deleting" @click="handleDeleteAccount">Xác nhận xóa</v-btn>
         </v-card-actions>
       </v-card>
     </v-dialog>
@@ -116,6 +131,7 @@ const authStore = useAuthStore();
 const showAddDialog = ref(false);
 const syncing = ref<string | null>(null);
 const showDeleteDialog = ref(false);
+const keepHistory = ref(true); // Default to keep history
 const showAccessDialog = ref(false);
 const newAccountName = ref('');
 const deleteTarget = ref<ZaloAccount | null>(null);
@@ -151,6 +167,7 @@ async function handleAddAccount() {
 
 function confirmDelete(account: ZaloAccount) {
   deleteTarget.value = account;
+  keepHistory.value = true; // Always default to true for safety
   showDeleteDialog.value = true;
 }
 
@@ -161,7 +178,7 @@ function openAccess(account: ZaloAccount) {
 
 async function handleDeleteAccount() {
   if (!deleteTarget.value) return;
-  const ok = await deleteAccount(deleteTarget.value);
+  const ok = await deleteAccount(deleteTarget.value, keepHistory.value);
   if (ok) {
     showDeleteDialog.value = false;
     deleteTarget.value = null;

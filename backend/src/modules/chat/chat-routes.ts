@@ -244,7 +244,7 @@ export async function chatRoutes(app: FastifyInstance) {
 
       const io = (app as any).io as Server;
       // We don't emit here anymore because the listener already did
-      
+
       return message;
     } catch (err: any) {
       logger.error('[chat] Send message error details:', err);

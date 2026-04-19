@@ -102,10 +102,12 @@ export function useZaloAccounts() {
     }
   }
 
-  async function deleteAccount(account: ZaloAccount) {
+  async function deleteAccount(account: ZaloAccount, keepHistory: boolean = false) {
     deleting.value = true;
     try {
-      await api.delete(`/zalo-accounts/${account.id}`);
+      await api.delete(`/zalo-accounts/${account.id}`, {
+          params: { keepHistory: String(keepHistory) }
+      });
       await fetchAccounts();
       return true;
     } catch (err: any) {

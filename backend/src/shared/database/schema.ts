@@ -482,3 +482,50 @@ export const marketingLogsRelations = relations(marketingLogs, ({ one }) => ({
     references: [contacts.id],
   }),
 }));
+
+// ── Message Blocks (Chatbot Flow) ──────────────────────────────────────────
+
+export const messageGroups = sqliteTable('message_groups', {
+  id: text('id').primaryKey(),
+  orgId: text('org_id').notNull().references(() => organizations.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  order: integer('order').default(0),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).default(sql`(strftime('%s', 'now') * 1000)`),
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).default(sql`0`),
+});
+
+export const messageBlocks = sqliteTable('message_blocks', {
+  id: text('id').primaryKey(),
+  groupId: text('group_id').notNull().references(() => messageGroups.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  order: integer('order').default(0),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).default(sql`(strftime('%s', 'now') * 1000)`),
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).default(sql`0`),
+});
+
+export const messageBlockItems = sqliteTable('message_block_items', {
+  id: text('id').primaryKey(),
+  blockId: text('block_id').notNull().references(() => messageBlocks.id, { onDelete: 'cascade' }),
+  type: text('type').notNull(), // 'text', 'image', 'file'
+  content: text('content'),
+  fileUrl: text('file_url'),
+  delay: integer('delay').default(5), // seconds
+  order: integer('order').default(0),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).default(sql`(strftime('%s', 'now') * 1000)`),
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).default(sql`0`),
+});
+
+// ── Relationships ──────────────────────────────────────────────────────────
+
+export const messageGroupsRelations = relations(messageGroups, ({ many }) => ({
+  blocks: many(messageBlocks),
+}));
+
+export const messageBlocksRelations = relations(messageBlocks, ({ one, many }) => ({
+  group: one(messageGroups, { fields: [messageBlocks.groupId], references: [messageGroups.id] }),
+  items: many(messageBlockItems),
+}));
+
+export const messageBlockItemsRelations = relations(messageBlockItems, ({ one }) => ({
+  block: one(messageBlocks, { fields: [messageBlockItems.blockId], references: [messageBlocks.id] }),
+}));

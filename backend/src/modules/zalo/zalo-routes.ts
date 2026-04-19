@@ -7,7 +7,7 @@ import { authMiddleware } from '../auth/auth-middleware.js';
 import { zaloPool } from './zalo-pool.js';
 import { db } from '../../shared/database/db.js';
 import { zaloAccounts } from '../../shared/database/schema.js';
-import { eq, and, asc } from 'drizzle-orm';
+import { eq, and, asc, inArray } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 
 export async function zaloRoutes(app: FastifyInstance): Promise<void> {
@@ -113,11 +113,13 @@ export async function zaloRoutes(app: FastifyInstance): Promise<void> {
   );
 
   // DELETE /api/v1/zalo-accounts/:id — disconnect and delete record
-  app.delete<{ Params: { id: string } }>(
+  app.delete<{ Params: { id: string }, Querystring: { keepHistory?: string } }>(
     '/api/v1/zalo-accounts/:id',
     async (request, reply) => {
       const { id } = request.params;
+      const { keepHistory = 'false' } = request.query;
       const user = request.user!;
+      const shouldKeep = keepHistory === 'true';
 
       const account = await db.query.zaloAccounts.findFirst({
         where: and(eq(zaloAccounts.id, id), eq(zaloAccounts.orgId, user.orgId)),
@@ -127,6 +129,27 @@ export async function zaloRoutes(app: FastifyInstance): Promise<void> {
       }
 
       zaloPool.disconnect(id);
+
+      if (shouldKeep) {
+          // Detach history instead of deleting it
+          const { conversations } = await import('../../shared/database/schema.js');
+          await db.update(conversations)
+            .set({ zaloAccountId: null })
+            .where(eq(conversations.zaloAccountId, id));
+      } else {
+          // Manual cleanup since cascade is removed
+          const { conversations, messages } = await import('../../shared/database/schema.js');
+          const convs = await db.query.conversations.findMany({
+              where: eq(conversations.zaloAccountId, id),
+              columns: { id: true }
+          });
+          const convIds = convs.map(c => c.id);
+          if (convIds.length > 0) {
+              await db.delete(messages).where(inArray(messages.conversationId, convIds));
+              await db.delete(conversations).where(eq(conversations.zaloAccountId, id));
+          }
+      }
+
       await db.delete(zaloAccounts).where(eq(zaloAccounts.id, id));
 
       return reply.status(204).send();

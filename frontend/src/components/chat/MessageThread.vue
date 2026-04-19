@@ -10,7 +10,7 @@
 
     <template v-else>
       <!-- Header -->
-      <div class="chat-header px-4 d-flex align-center flex-shrink-0">
+      <div v-if="!hideHeader" class="chat-header px-4 d-flex align-center flex-shrink-0">
         <v-avatar size="40" class="mr-3" color="#f0f2f5">
           <v-img v-if="conversation.contact?.avatarUrl" :src="conversation.contact.avatarUrl" referrerpolicy="no-referrer">
             <template #placeholder>
@@ -146,12 +146,60 @@
           <v-btn icon="mdi-paperclip" variant="text" size="small" style="color: #4a4a4a;" @click="$refs.fileInput.click()" />
           
           <v-spacer />
-          <v-btn icon="mdi-robot-outline" variant="text" size="small" color="primary" @click="$emit('ask-ai')" />
-
+          <v-btn icon="mdi-flash-outline" variant="text" size="small" style="color: #4a4a4a;" title="Gửi kịch bản mẫu" @click="openBlockSelector" />
+          
           <!-- Hidden inputs -->
           <input ref="imageInput" type="file" accept="image/*" class="d-none" @change="onFileChange($event, 'image')" />
           <input ref="fileInput" type="file" class="d-none" @change="onFileChange($event, 'file')" />
         </div>
+
+        <!-- Block Selector Dialog -->
+        <v-dialog v-model="showBlockSelector" max-width="500" scrollable>
+          <v-card class="rounded-xl">
+            <v-card-title class="d-flex align-center pa-4">
+              <v-icon icon="mdi-robot-outline" color="primary" class="mr-3" />
+              <span class="text-h6 font-weight-bold">Gửi kịch bản (Block)</span>
+              <v-spacer />
+              <v-btn icon="mdi-close" variant="text" size="small" @click="showBlockSelector = false" />
+            </v-card-title>
+            
+            <div class="px-4 pb-2">
+              <v-text-field
+                v-model="blockSearch"
+                placeholder="Tìm tên kịch bản..."
+                prepend-inner-icon="mdi-magnify"
+                density="compact"
+                variant="solo-filled"
+                flat
+                hide-details
+                rounded="lg"
+              />
+            </div>
+
+            <v-card-text class="pa-0" style="height: 400px;">
+              <v-list v-if="filteredGroups.length">
+                <template v-for="group in filteredGroups" :key="group.id">
+                  <v-list-subheader class="text-primary font-weight-bold text-uppercase">{{ group.name }}</v-list-subheader>
+                  <v-list-item
+                    v-for="block in group.blocks"
+                    :key="block.id"
+                    :title="block.name"
+                    prepend-icon="mdi-chat-processing-outline"
+                    @click="sendBlock(block.id)"
+                  >
+                    <template #append>
+                       <v-icon size="small" color="grey">mdi-chevron-right</v-icon>
+                    </template>
+                  </v-list-item>
+                  <v-divider />
+                </template>
+              </v-list>
+              <div v-else class="pa-8 text-center text-grey">
+                Không tìm thấy kịch bản nào
+              </div>
+            </v-card-text>
+          </v-card>
+        </v-dialog>
 
         <div class="d-flex align-end">
           <v-textarea
@@ -215,6 +263,7 @@ const props = defineProps<{
   loading: boolean;
   sending: boolean;
   showContactPanel?: boolean;
+  hideHeader?: boolean;
 }>();
 
 const chatStore = useChatStore();
@@ -229,6 +278,46 @@ const showImagePreview = ref(false);
 const showSnackbar = ref(false);
 const snackbarText = ref('');
 const snackbarColor = ref('error');
+
+// Block Selector Logic
+const showBlockSelector = ref(false);
+const blockSearch = ref('');
+const messageGroups = ref<any[]>([]);
+
+async function openBlockSelector() {
+    showBlockSelector.value = true;
+    try {
+        const res = await api.get('/message-groups');
+        messageGroups.value = res.data;
+    } catch (err) {
+        console.error('Failed to fetch message groups:', err);
+    }
+}
+
+const filteredGroups = computed(() => {
+    if (!blockSearch.value) return messageGroups.value;
+    const query = blockSearch.value.toLowerCase();
+    return messageGroups.value.map(g => ({
+        ...g,
+        blocks: g.blocks.filter((b: any) => b.name.toLowerCase().includes(query))
+    })).filter(g => g.blocks.length > 0);
+});
+
+async function sendBlock(blockId: string) {
+    if (!props.conversation) return;
+    showBlockSelector.value = false;
+    try {
+        await api.post('/chat/send-block', {
+            conversationId: props.conversation.id,
+            blockId
+        });
+        snackbarText.value = 'Đã bắt đầu gửi kịch bản!';
+        snackbarColor.value = 'success';
+        showSnackbar.value = true;
+    } catch (err: any) {
+        showError(err.response?.data?.error || 'Gửi kịch bản thất bại');
+    }
+}
 
 async function acceptFriend() {
     if (!props.conversation) return;
@@ -451,12 +540,18 @@ watch(() => props.messages.length, async () => {
 }
 
 .chat-messages-area {
+  flex: 1;
+  overflow-y: auto;
   scroll-behavior: smooth;
+  background-color: #f4f7f9;
 }
 
 .chat-input-container {
+  flex-shrink: 0;
   background-color: var(--z-main-bg);
   border-top: 1px solid var(--z-border);
+  padding: 8px 16px;
+  z-index: 10;
 }
 
 .chat-textarea :deep(textarea) {

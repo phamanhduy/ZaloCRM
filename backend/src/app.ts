@@ -47,6 +47,7 @@ import { integrationRoutes } from './modules/integrations/integration-routes.js'
 import { automationRoutes } from './modules/automation/automation-routes.js';
 import { templateRoutes } from './modules/automation/template-routes.js';
 import { aiRoutes } from './modules/ai/ai-routes.js';
+import { blockRoutes } from './modules/chat/block-routes.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -149,6 +150,7 @@ async function bootstrap() {
   await app.register(aiRoutes);
   await app.register(import('./modules/chat/upload-routes.js').then(m => m.uploadRoutes));
   await app.register(import('./modules/marketing/marketing-routes.js').then(m => m.marketingRoutes));
+  await app.register(blockRoutes);
 
   // Liveness/readiness probe — also checks DB connectivity
   app.get('/health', async () => {
