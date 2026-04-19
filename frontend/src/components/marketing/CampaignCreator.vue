@@ -98,6 +98,7 @@
                     <thead>
                         <tr>
                             <th class="text-left">Họ tên</th>
+                            <th class="text-left">Loại</th>
                             <th class="text-left">SĐT</th>
                             <th class="text-left">Trạng thái</th>
                         </tr>
@@ -110,11 +111,16 @@
                                     {{ c.fullName }}
                                 </div>
                             </td>
+                            <td>
+                                <v-chip size="x-small" :color="c.metadata?.isGroup ? 'info' : 'grey'" variant="tonal">
+                                    {{ c.metadata?.isGroup ? 'Nhóm' : 'Cá nhân' }}
+                                </v-chip>
+                            </td>
                             <td>{{ c.phone || '—' }}</td>
                             <td><v-chip size="x-small" variant="tonal">{{ c.status }}</v-chip></td>
                         </tr>
                         <tr v-if="previewContacts.length === 0">
-                            <td colspan="3" class="text-center py-4 text-disabled">Không có khách hàng nào khớp bộ lọc</td>
+                            <td colspan="4" class="text-center py-4 text-disabled">Không có khách hàng nào khớp bộ lọc</td>
                         </tr>
                     </tbody>
                 </v-table>

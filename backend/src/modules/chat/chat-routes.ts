@@ -266,6 +266,43 @@ export async function chatRoutes(app: FastifyInstance) {
     }
   });
 
+  // ── Accept Friend Request ──────────────────────────────────────────────────
+  app.post('/api/v1/conversations/:id/accept-friend', { preHandler: requireZaloAccess('chat') }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const user = request.user!;
+    const { id } = request.params as { id: string };
+
+    const conversation = await db.query.conversations.findFirst({
+      where: and(eq(conversations.id, id), eq(conversations.orgId, user.orgId)),
+      with: { zaloAccount: true },
+    });
+
+    if (!conversation) return reply.status(404).send({ error: 'Conversation not found' });
+    if (!conversation.isFriendRequest) return reply.status(400).send({ error: 'Not a friend request' });
+
+    const instance = zaloPool.getInstance(conversation.zaloAccountId);
+    if (!instance?.api) return reply.status(400).send({ error: 'Zalo account not connected' });
+
+    try {
+      // Assuming zca-js has acceptFriendRequest or similar
+      // We use the externalThreadId as the Zalo UID for user chats
+      const zaloUid = conversation.externalThreadId;
+      if (!zaloUid) throw new Error('No Zalo UID found for this conversation');
+
+      // Call Zalo API to accept
+      await (instance.api as any).acceptFriendRequest(zaloUid);
+
+      // Update conversation status in DB
+      await db.update(conversations)
+        .set({ isFriendRequest: false, friendRequestMessage: null })
+        .where(eq(conversations.id, id));
+
+      return { success: true };
+    } catch (err: any) {
+      logger.error('[chat] Accept friend request error:', err.message);
+      reply.status(500).send({ error: err.message || 'Failed to accept friend request' });
+    }
+  });
+
   // ── Mark conversation as read ────────────────────────────────────────────
   app.post('/api/v1/conversations/:id/mark-read', async (request: FastifyRequest, reply: FastifyReply) => {
     const user = request.user!;

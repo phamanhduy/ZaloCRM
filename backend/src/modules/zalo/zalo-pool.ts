@@ -52,6 +52,7 @@ class ZaloAccountPool {
   async loginQR(accountId: string): Promise<void> {
     const zalo = new Zalo({ 
       logging: false,
+      selfListen: true,
       imageMetadataGetter: (imagePath: string) => {
         const size = sizeOf(imagePath);
         return { width: size.width, height: size.height };
@@ -132,6 +133,7 @@ class ZaloAccountPool {
   async reconnect(accountId: string, credentials: ZaloCredentials): Promise<void> {
     const zalo = new Zalo({ 
       logging: false,
+      selfListen: true,
       imageMetadataGetter: (imagePath: string) => {
         const size = sizeOf(imagePath);
         return { width: size.width, height: size.height };

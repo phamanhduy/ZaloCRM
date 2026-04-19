@@ -43,6 +43,19 @@
         </div>
       </div>
 
+      <!-- Friend Request Banner -->
+      <div v-if="conversation.isFriendRequest" class="friend-request-banner bg-blue-lighten-5 pa-3 border-b d-flex align-center">
+        <v-icon icon="mdi-account-plus" color="primary" class="mr-3" />
+        <div class="flex-grow-1">
+          <div class="text-subtitle-2 font-weight-bold">Lời mời kết bạn</div>
+          <div class="text-caption">{{ conversation.friendRequestMessage || 'Người dùng này muốn kết bạn với bạn.' }}</div>
+        </div>
+        <div class="d-flex gap-2">
+          <v-btn size="small" variant="text" color="grey" class="text-none">Bỏ qua</v-btn>
+          <v-btn size="small" color="primary" class="text-none font-weight-bold" :loading="accepting" @click="acceptFriend">Đồng ý</v-btn>
+        </div>
+      </div>
+
       <!-- Messages Area -->
       <div ref="messagesContainer" class="flex-grow-1 overflow-y-auto pa-4 chat-messages-area">
         <div v-if="loading" class="d-flex justify-center py-4">
@@ -206,6 +219,7 @@ const props = defineProps<{
 
 const chatStore = useChatStore();
 const emit = defineEmits<{ send: [content: string]; 'toggle-contact-panel': []; 'ask-ai': [] }>();
+const accepting = ref(false);
 
 const inputText = ref('');
 const messagesContainer = ref<HTMLElement | null>(null);
@@ -215,6 +229,23 @@ const showImagePreview = ref(false);
 const showSnackbar = ref(false);
 const snackbarText = ref('');
 const snackbarColor = ref('error');
+
+async function acceptFriend() {
+    if (!props.conversation) return;
+    accepting.value = true;
+    try {
+        await api.post(`/conversations/${props.conversation.id}/accept-friend`);
+        snackbarText.value = 'Đã đồng ý kết bạn!';
+        snackbarColor.value = 'success';
+        showSnackbar.value = true;
+        // Refresh conversation data
+        await chatStore.fetchConversations();
+    } catch (err: any) {
+        showError(err.response?.data?.error || 'Không thể đồng ý kết bạn');
+    } finally {
+        accepting.value = false;
+    }
+}
 
 const blockedExtensions = ['.exe', '.msi', '.bat', '.sh', '.php', '.js', '.vbs', '.cmd', '.scr'];
 
@@ -317,7 +348,8 @@ function getImageUrl(msg: Message) {
   // Check new attachments first
   if (msg.attachments && msg.attachments.length > 0) {
     const att = msg.attachments[0];
-    if (msg.contentType === 'image' || att.type?.includes('image')) {
+    if (att && (msg.contentType === 'image' || att.type?.includes('image'))) {
+       if (!att.path) return null;
        const parts = att.path.split(/[\\/]/);
        const base = parts[parts.length - 1];
        return att.path.includes('http') ? att.path : `/uploads/${base}`;
@@ -337,7 +369,8 @@ function getFileInfo(msg: Message) {
   // Check new attachments first
   if (msg.attachments && msg.attachments.length > 0) {
     const att = msg.attachments[0];
-    if (msg.contentType === 'file' || att.type) {
+    if (att && (msg.contentType === 'file' || att.type)) {
+       if (!att.path) return null;
        const parts = att.path.split(/[\\/]/);
        const base = parts[parts.length - 1];
        return { 

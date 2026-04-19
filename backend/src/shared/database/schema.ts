@@ -177,6 +177,8 @@ export const conversations = sqliteTable('conversations', {
   lastMessageAt: integer('last_message_at', { mode: 'timestamp_ms' }),
   unreadCount: integer('unread_count').notNull().default(0),
   isReplied: integer('is_replied', { mode: 'boolean' }).notNull().default(true),
+  isFriendRequest: integer('is_friend_request', { mode: 'boolean' }).notNull().default(false),
+  friendRequestMessage: text('friend_request_message'),
   createdAt: integer('created_at', { mode: 'timestamp_ms' }).default(sql`(strftime('%s', 'now') * 1000)`),
 }, (table) => ({
   unq: uniqueIndex('conversations_unq').on(table.zaloAccountId, table.externalThreadId),

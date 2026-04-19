@@ -158,6 +158,27 @@ export function attachZaloListener(ctx: ListenerContext): void {
     }
   });
 
+  listener.on('friend_event', async (data: any) => {
+    try {
+        logger.info(`[zalo:${accountId}] >>> RECEIVED FRIEND EVENT:`, JSON.stringify(data, null, 2));
+        // Type 2 is usually incoming friend request with message
+        if (data.type === 2 || data.data?.message) {
+          const { handleFriendRequest } = await import('../chat/message-handler.js');
+          await handleFriendRequest(accountId, data.data || data);
+          io?.emit('chat:refresh-conversations', { accountId });
+        }
+    } catch (err) {
+        logger.error(`[zalo:${accountId}] Friend event handler error:`, err);
+    }
+  });
+
+  // Catch-all listener for debugging unknown events
+  const originalEmit = listener.emit;
+  listener.emit = function(event: string, ...args: any[]) {
+      logger.info(`[zalo:${accountId}] EVENT: "${event}"`, JSON.stringify(args, null, 2));
+      return originalEmit.apply(this, [event, ...args]);
+  };
+
   listener.on('closed', (code: number, reason: string) => {
     logger.warn(`[zalo:${accountId}] Listener closed: ${code} ${reason}`);
     onDisconnected(accountId);

@@ -175,7 +175,11 @@ export class MarketingService {
       msgData.attachments = msgData.attachments.filter((a: any) => a !== null);
     }
 
-    await instance.api.sendMessage(msgData, contact.zaloUid, 0);
+    // Determine thread type: 0 for user, 1 for group
+    const isGroup = (contact.metadata as any)?.isGroup === true;
+    const threadType = isGroup ? 1 : 0;
+
+    await instance.api.sendMessage(msgData, contact.zaloUid, threadType);
 
     // Record log
     await db.insert(marketingLogs).values({

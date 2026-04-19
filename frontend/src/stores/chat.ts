@@ -25,6 +25,8 @@ export interface Conversation {
   lastMessageAt: string | null;
   unreadCount: number;
   isReplied: boolean;
+  isFriendRequest: boolean;
+  friendRequestMessage: string | null;
   lastMessage?: Message | null;
   messages?: Message[];
 }
@@ -213,6 +215,10 @@ export const useChatStore = defineStore('chat', () => {
     socket.on('chat:deleted', (data: { msgId: string }) => {
       const msg = messages.value.find(m => m.zaloMsgId === data.msgId);
       if (msg) msg.isDeleted = true;
+    });
+
+    socket.on('chat:refresh-conversations', () => {
+      fetchConversations();
     });
   }
 

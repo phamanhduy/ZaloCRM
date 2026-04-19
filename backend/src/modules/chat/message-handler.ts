@@ -185,11 +185,13 @@ async function upsertContact(msg: IncomingMessage, orgId: string): Promise<strin
     return groupContact.id;
   }
 
-  // User messages: self messages don't create a contact
-  if (msg.isSelf) return null;
+  // User messages: 
+  // If isSelf, the threadId is the recipient's UID.
+  // If not isSelf, the senderUid is the contact's UID.
+  const contactZaloUid = msg.isSelf ? msg.threadId : msg.senderUid;
 
   let contact = await db.query.contacts.findFirst({
-    where: and(eq(contacts.zaloUid, msg.senderUid), eq(contacts.orgId, orgId)),
+    where: and(eq(contacts.zaloUid, contactZaloUid), eq(contacts.orgId, orgId)),
     columns: { id: true, fullName: true, avatarUrl: true },
   });
 
@@ -198,14 +200,14 @@ async function upsertContact(msg: IncomingMessage, orgId: string): Promise<strin
     await db.insert(contacts).values({
       id,
       orgId,
-      zaloUid: msg.senderUid,
-      fullName: msg.senderName || 'Unknown',
-      avatarUrl: msg.avatarUrl || null,
+      zaloUid: contactZaloUid,
+      fullName: msg.isSelf ? 'Khách hàng' : (msg.senderName || 'Unknown'),
+      avatarUrl: msg.isSelf ? null : (msg.avatarUrl || null),
     });
-    contact = { id, fullName: msg.senderName || 'Unknown', avatarUrl: msg.avatarUrl || null };
+    contact = { id, fullName: msg.isSelf ? 'Khách hàng' : (msg.senderName || 'Unknown'), avatarUrl: msg.isSelf ? null : (msg.avatarUrl || null) };
     // Emit webhook for new contact created
     emitWebhook(orgId, 'contact.created', { contactId: contact.id, fullName: contact.fullName });
-  } else {
+  } else if (!msg.isSelf) {
     // Update if name changed OR if avatar is missing but now provided
     const nameChanged = msg.senderName && contact.fullName !== msg.senderName;
     const avatarMissing = !contact.avatarUrl && msg.avatarUrl;
@@ -283,4 +285,64 @@ export async function handleMessageUndo(accountId: string, zaloMsgId: string): P
   } catch (err) {
     logger.error('[message-handler] handleMessageUndo error:', err);
   }
+}
+
+export async function handleFriendRequest(accountId: string, data: any): Promise<void> {
+    try {
+        const account = await db.query.zaloAccounts.findFirst({
+            where: eq(zaloAccounts.id, accountId),
+            columns: { orgId: true },
+        });
+        if (!account) return;
+
+        const senderUid = String(data.fromUid || data.uidFrom);
+        const msgText = data.message || data.msg || '';
+
+        // Upsert contact
+        const contactId = await upsertContact({
+            accountId,
+            senderUid,
+            senderName: data.dName || 'Người lạ',
+            avatarUrl: data.avatar,
+            content: msgText,
+            contentType: 'text',
+            msgId: '',
+            timestamp: Date.now(),
+            isSelf: false,
+            threadId: senderUid,
+            threadType: 'user',
+        }, account.orgId);
+
+        // Find or create conversation with friend request flag
+        const existing = await db.query.conversations.findFirst({
+            where: and(eq(conversations.zaloAccountId, accountId), eq(conversations.externalThreadId, senderUid)),
+        });
+
+        if (existing) {
+            await db.update(conversations)
+                .set({ 
+                    isFriendRequest: true, 
+                    friendRequestMessage: msgText,
+                    lastMessageAt: new Date(),
+                    unreadCount: sql`${conversations.unreadCount} + 1`
+                })
+                .where(eq(conversations.id, existing.id));
+        } else {
+            const id = uuidv4();
+            await db.insert(conversations).values({
+                id,
+                orgId: account.orgId,
+                zaloAccountId: accountId,
+                contactId,
+                threadType: 'user',
+                externalThreadId: senderUid,
+                lastMessageAt: new Date(),
+                isFriendRequest: true,
+                friendRequestMessage: msgText,
+                unreadCount: 1,
+            });
+        }
+    } catch (err) {
+        logger.error('[message-handler] handleFriendRequest error:', err);
+    }
 }
